@@ -52,6 +52,8 @@ A watch spec is JSON. Everything in it is data; nothing is executed.
       { left: { kind: "field", name: "launchDate" }, op: "gt", right: { kind: "today" } } ] }
 - summary: one human sentence with placeholders {field}, {prev.field} and {today},
   eg "Price is {price} (target under 300)" or "Launch date is {launchDate} (was {prev.launchDate})".
+  It must accurately describe the observed values whether the condition matches or not;
+  do not phrase it as a notification or event that only holds when the condition is true.
 - notifyOn: "transition" (notify when the condition goes false -> true; the default) or
   "every-match" (notify on every run where it holds).
 

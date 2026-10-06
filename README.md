@@ -12,11 +12,16 @@ The user intent is compiled into a deterministic, declarative query: CSS or XPat
 
 After that, routine checks never call a model. A scheduled check loads the page, reads the values, and evaluates the condition.
 
-Nothing model-written is ever executed. The condition is data: at most 8 clauses joined by "all" or "any", each comparing a field to a value, its previous value, or today. A small interpreter evaluates it, and it is type-checked against the fields when the watch is saved. That interpreter is the sandbox, and it can only do a bounded amount of work. Both example use cases above are expressible and tested against real markup; [docs/spec.md](docs/spec.md#7-the-condition-language) shows them as specs, lists what the format cannot say (arithmetic, nested and/or), and covers CEL as the upgrade path if that is ever needed.
-
 Watchers are self-healing, so if the upstream changes format, we don't silently fail. A check notices the change and tries to find the moved values again. If it can't, it reports itself broken. A broken selector is never reported as "condition not met".
 
 The user experience includes a simple UI to see / manage existing watches. Users can also select a component on a web page to steer the agent.
+
+## Screenshots
+
+Create watches using chat and manage them on the UI:
+![Main Page with saved watches and chat](docs/ss1.png)
+Manually select:
+![Second Screenshot](docs/ss2.png)
 
 ## Stack
 
@@ -52,6 +57,10 @@ pnpm install
 pnpm approve-builds              # allow esbuild/workerd install scripts if prompted
 pnpm exec wrangler login         # or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID
 ```
+```sh
+# Set webhook for deployment (discord-compatible)
+pnpm exec wrangler secret put NOTIFY_WEBHOOK_URL
+```
 
 ## Usage
 
@@ -68,6 +77,8 @@ pnpm types                            # after editing wrangler.jsonc
 - **Steer with the picker:** click **Pick**, load a URL, click the element, then **Use this**.
 - **Manage:** Run now, Pause/Resume, Details, Delete on each card, or ask the chat.
 - **Notifications** go to the inbox, the chat, and `NOTIFY_WEBHOOK_URL` if set.
+
+
 
 Offline mode has no chat, but `testSpec(spec)` and `createFromSpec({ name, intent, cron, spec })` work over the agent's RPC with a hand-written spec.
 

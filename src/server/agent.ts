@@ -225,7 +225,7 @@ export class Hachiko extends AIChatAgent<Env, HachikoState> {
 				execute: async ({ url }) => {
 					const bad = checkUrl(url);
 					if (bad) return { error: bad };
-					const view = await withPage(this.env, url, undefined, (page) => outline(page));
+					const view = await withPage(this.env, url, undefined, (page) => outline(page), { operation: "inspect" });
 					return { outline: renderOutline(view, 12_000) };
 				},
 			}),
@@ -340,7 +340,7 @@ export class Hachiko extends AIChatAgent<Env, HachikoState> {
 	async snapshot(url: string) {
 		const bad = checkUrl(url);
 		if (bad) return { error: bad };
-		return withPage(this.env, url, undefined, (page) => pickerSnapshot(page), { pixels: true });
+		return withPage(this.env, url, undefined, (page) => pickerSnapshot(page), { pixels: true, operation: "picker" });
 	}
 
 	@callable()

@@ -80,7 +80,13 @@ function WatchCard({ watch: w, agent }: { watch: WatchView; agent: Agent }) {
 					{w.lastMatch && <span className="pill pill-match">match</span>}
 				</div>
 			</div>
-			<p className="summary">{w.lastSummary ?? "No successful check yet."}</p>
+			<p className="summary">
+				{w.lastMatch === true
+					? w.lastSummary ?? "Condition matched."
+					: w.lastMatch === false
+						? "No alert condition matched on the last check."
+						: "No successful check yet."}
+			</p>
 			<dl className="meta">
 				<dt>schedule</dt><dd><code>{w.cron}</code> UTC</dd>
 				<dt>last run</dt><dd>{w.lastRunAt ? ago(w.lastRunAt) : "never"}</dd>
@@ -148,7 +154,8 @@ function Run({ run: r }: { run: RunView }) {
 	return (
 		<li>
 			<span className={`pill pill-${r.outcome}`}>{r.outcome}</span> v{r.version} <time>{ago(r.startedAt)}</time>
-			{r.summary && <span> -- {r.summary}</span>}
+			{r.match !== null && <span className={`pill ${r.match ? "pill-match" : "pill-no-match"}`}>{r.match ? "match" : "no match"}</span>}
+			{r.match === true && r.summary && <span> -- {r.summary}</span>}
 			{r.problems.length > 0 && <ul className="problems">{r.problems.map((p, i) => <li key={i}>{p}</li>)}</ul>}
 		</li>
 	);

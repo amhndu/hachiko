@@ -22,7 +22,15 @@
 		"ORCHESTRATOR_MODEL": "@cf/zai-org/glm-4.7-flash",
 		"COMPILER_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 	},
-	"observability": { "enabled": true },
+	"observability": {
+		"logs": {
+		  "enabled": true,
+		  "invocation_logs": true
+		},
+		"traces": {
+		  "enabled": false
+		}
+	},
 	// Local runs without Cloudflare credentials: every binding except the
 	// models, which have no local emulation. The manual-spec path (testSpec,
 	// createFromSpec) and scheduled checks work; chat, compile and heal throw.

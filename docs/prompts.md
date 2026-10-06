@@ -48,3 +48,12 @@ reference: https://developers.cloudflare.com/agents/
 * Replace cloudflare dynamic workers with deterministic / declarative extraction. All components should work in free tier
 
 * ensure usecases like "notify me when product X has a sale price less than Y" "notify me when the ISRO rocket launch date on https://lvg.shar.gov.in/VSCREGISTRATION/index.jsp is updated and is in the future" are expressible in this format. If needed, consider CEL if the current declarative spec is insufficient
+
+----
+
+* It fails on prod due to rate limit errors, debug what happened
+* check @/tmp/logs-2026-10-06T03_35_54.543Z.csv and [Image of CF Browser Logs]
+* instead can we work with just one fetch? no need to call it again since we already did it once. why do we need to keep it alive? can't we just store the response for later tool calls?
+* improve logging and reliability, do backoff on the backend instead of exposing to the agent
+* the ui is confusing, clearly show when a conditon is satisified
+

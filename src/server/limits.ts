@@ -21,7 +21,9 @@ export const LIMITS = {
 	maxSummaryLen: 280,
 
 	// The browser.
+	browserLaunchIntervalMs: 20_000,
 	navTimeoutMs: 30_000,
+	pageSettleTimeoutMs: 5_000,
 	waitForTimeoutMs: 10_000,
 	maxFieldTextLen: 500,
 	maxMatchesPerField: 20,

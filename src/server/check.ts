@@ -1,5 +1,5 @@
 import type { JsonObject } from "./json";
-import { extract, outline, withPage, type Outline, type RawField } from "./browse";
+import { extract, outline, withPage, type RawField } from "./browse";
 import { compileSpec, proposeHeal } from "./compile";
 import type { ConditionCtx } from "./condition";
 import { evaluate, type Evaluation } from "./evaluate";
@@ -11,7 +11,7 @@ import { SpecError, validateSpec, type WatchSpec } from "./spec";
 // dry run. Each function is one durable step's worth of work.
 
 export async function observe(env: Env, spec: WatchSpec): Promise<Record<string, RawField>> {
-	return withPage(env, spec.url, spec.waitFor, (page) => extract(page, spec.fields));
+	return withPage(env, spec.url, spec.waitFor, (page) => extract(page, spec.fields), { operation: "check" });
 }
 
 export async function dryRun(env: Env, spec: WatchSpec, ctx: ConditionCtx): Promise<Evaluation> {
@@ -77,7 +77,7 @@ export async function heal(
 			problems = evaluation.problems.length > 0 ? evaluation.problems : problems;
 		}
 		return { healed: false, reasons: rejected, attempts: LIMITS.maxHealAttemptsPerRun };
-	});
+	}, { operation: "heal" });
 }
 
 export type Draft = {
@@ -87,38 +87,40 @@ export type Draft = {
 	preview: { values: JsonObject; result: EvalOutput["result"]; problems: string[] };
 };
 
-// Intent -> spec -> dry run against the live page; one retry with the dry
-// run's problems fed back. A draft that still fails is returned with its
-// problems so the orchestrator can tell the user rather than save it.
+// Intent -> spec -> dry run against one loaded page; one retry with the dry
+// run's problems fed back. Keeping the page open avoids a second Browser Run
+// launch between compiling the selectors and checking them.
 export async function draftWatch(
 	env: Env,
 	args: { url: string; intent: string; hint?: string; now: string },
 ): Promise<Draft> {
-	const view: Outline = await withPage(env, args.url, undefined, (page) => outline(page));
-	const ctx: ConditionCtx = { now: args.now, prev: null };
-	let previous: { spec: WatchSpec; problems: string[]; values: JsonObject } | undefined;
-	let last: Draft | undefined;
-	for (let attempt = 0; attempt < 2; attempt++) {
-		const compiled = await compileSpec(env, { ...args, outline: view, previous });
-		let spec: WatchSpec;
-		try {
-			spec = validateSpec(compiled.spec);
-		} catch (e) {
-			const problems = e instanceof SpecError ? e.problems : [(e as Error).message];
-			previous = { spec: compiled.spec, problems, values: {} };
-			last = { ...compiled, preview: { values: {}, result: null, problems } };
-			continue;
+	return withPage(env, args.url, undefined, async (page) => {
+		const view = await outline(page);
+		const ctx: ConditionCtx = { now: args.now, prev: null };
+		let previous: { spec: WatchSpec; problems: string[]; values: JsonObject } | undefined;
+		let last: Draft | undefined;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const compiled = await compileSpec(env, { ...args, outline: view, previous });
+			let spec: WatchSpec;
+			try {
+				spec = validateSpec(compiled.spec);
+			} catch (e) {
+				const problems = e instanceof SpecError ? e.problems : [(e as Error).message];
+				previous = { spec: compiled.spec, problems, values: {} };
+				last = { ...compiled, preview: { values: {}, result: null, problems } };
+				continue;
+			}
+			const evaluation = evaluate(spec, await extract(page, spec.fields), ctx);
+			const problems = describeProblems(evaluation);
+			last = {
+				name: compiled.name,
+				explanation: compiled.explanation,
+				spec,
+				preview: { values: evaluation.out.values, result: evaluation.out.result, problems },
+			};
+			if (problems.length === 0) return last;
+			previous = { spec, problems, values: evaluation.out.values };
 		}
-		const evaluation = await dryRun(env, spec, ctx);
-		const problems = describeProblems(evaluation);
-		last = {
-			name: compiled.name,
-			explanation: compiled.explanation,
-			spec,
-			preview: { values: evaluation.out.values, result: evaluation.out.result, problems },
-		};
-		if (problems.length === 0) return last;
-		previous = { spec, problems, values: evaluation.out.values };
-	}
-	return last as Draft;
+		return last as Draft;
+	}, { operation: "draft" });
 }

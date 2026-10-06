@@ -1,4 +1,4 @@
-import puppeteer, { type Page } from "@cloudflare/puppeteer";
+import puppeteer, { type Browser, type Page } from "@cloudflare/puppeteer";
 import { z } from "zod";
 import { BOXES_SRC, EXTRACT_SRC, OUTLINE_SRC } from "./inpage";
 import { checkShape } from "./json";
@@ -52,6 +52,7 @@ export class FetchError extends Error {
 // Serialize sessions within this Worker isolate to leave room for other
 // isolates and prevent one chat turn from exhausting the shared allowance.
 let browserQueue: Promise<void> = Promise.resolve();
+let lastBrowserLaunchAt = 0;
 
 // One browser session per call: launch, load, run fn, close. Images, fonts
 // and media are blocked unless the caller wants pixels (the picker).
@@ -60,20 +61,31 @@ export async function withPage<T>(
 	url: string,
 	waitFor: string | undefined,
 	fn: (page: Page) => Promise<T>,
-	opts: { pixels?: boolean } = {},
+	opts: { pixels?: boolean; operation?: string } = {},
 ): Promise<T> {
 	const sessionId = crypto.randomUUID();
 	const host = safeHost(url);
+	const operation = opts.operation ?? "unknown";
 	const requestedAt = Date.now();
 	let release!: () => void;
 	const previous = browserQueue;
 	browserQueue = new Promise<void>((resolve) => { release = resolve; });
 	await previous;
 	const queueWaitMs = Date.now() - requestedAt;
+	const launchWaitMs = Math.max(0, lastBrowserLaunchAt + LIMITS.browserLaunchIntervalMs - Date.now());
+	if (launchWaitMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, launchWaitMs));
 	let phase = "launch";
-	console.info("browser.session.start", { sessionId, host, queueWaitMs, pixels: opts.pixels ?? false });
+	log("info", {
+		event: "browser.session.start",
+		sessionId,
+		host,
+		operation,
+		queueWaitMs,
+		launchWaitMs,
+		pixels: opts.pixels ?? false,
+	});
 	try {
-		const launched = await puppeteer.launch(env.BROWSER);
+		const launched = await launchWithBackoff(env, { sessionId, host, operation });
 		try {
 			phase = "new_page";
 			const page = await launched.newPage();
@@ -87,13 +99,18 @@ export async function withPage<T>(
 			let res;
 			try {
 				phase = "navigation";
-				res = await page.goto(url, { waitUntil: "networkidle2", timeout: LIMITS.navTimeoutMs });
+				res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: LIMITS.navTimeoutMs });
 			} catch (e) {
 				throw new FetchError(`navigation failed: ${(e as Error).message}`);
 			}
-			console.info("browser.session.navigation_complete", {
+			// Some sites keep analytics or streaming connections open indefinitely.
+			// Let them settle briefly, but a non-idle network must not fail a usable DOM.
+			await page.waitForNetworkIdle({ idleTime: 500, timeout: LIMITS.pageSettleTimeoutMs }).catch(() => undefined);
+			log("info", {
+				event: "browser.session.navigation_complete",
 				sessionId,
 				host,
+				operation,
 				status: res?.status() ?? null,
 				startupAndNavigationMs: Date.now() - requestedAt - queueWaitMs,
 			});
@@ -107,14 +124,15 @@ export async function withPage<T>(
 			phase = "page_task";
 			return await fn(page);
 		} finally {
-			phase = "close";
 			try {
 				await launched.close();
-				console.info("browser.session.close", { sessionId, host, elapsedMs: Date.now() - requestedAt });
+				log("info", { event: "browser.session.close", sessionId, host, operation, elapsedMs: Date.now() - requestedAt });
 			} catch (e) {
-				console.error("browser.session.close_error", {
+				log("error", {
+					event: "browser.session.close_error",
 					sessionId,
 					host,
+					operation,
 					errorName: e instanceof Error ? e.name : "UnknownError",
 					error: safeError(e, url),
 				});
@@ -122,9 +140,11 @@ export async function withPage<T>(
 			}
 		}
 	} catch (e) {
-		console.error("browser.session.error", {
+		log("error", {
+			event: "browser.session.error",
 			sessionId,
 			host,
+			operation,
 			phase,
 			elapsedMs: Date.now() - requestedAt,
 			errorName: e instanceof Error ? e.name : "UnknownError",
@@ -134,6 +154,42 @@ export async function withPage<T>(
 	} finally {
 		release();
 	}
+}
+
+async function launchWithBackoff(
+	env: Env,
+	context: { sessionId: string; host: string; operation: string },
+): Promise<Browser> {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		lastBrowserLaunchAt = Date.now();
+		try {
+			return await puppeteer.launch(env.BROWSER);
+		} catch (e) {
+			if (attempt > 0 || !isLaunchRateLimit(e)) throw e;
+			const retryWaitMs = Math.max(0, lastBrowserLaunchAt + LIMITS.browserLaunchIntervalMs - Date.now());
+			log("info", {
+				event: "browser.session.launch_backoff",
+				...context,
+				attempt: attempt + 1,
+				retryWaitMs,
+			});
+			await new Promise<void>((resolve) => setTimeout(resolve, retryWaitMs));
+		}
+	}
+	throw new Error("unreachable");
+}
+
+function isLaunchRateLimit(error: unknown): boolean {
+	return /code:\s*429.*rate limit exceeded/i.test(error instanceof Error ? error.message : String(error));
+}
+
+// Keep the event name as plain text. The Workers export omitted a JSON-only
+// console message, so append the structured fields after a readable prefix.
+function log(level: "info" | "error", fields: Record<string, unknown>): void {
+	const { event, ...details } = fields;
+	const message = `${String(event)} ${JSON.stringify({ timestamp: new Date().toISOString(), ...details })}`;
+	if (level === "error") console.error(message);
+	else console.info(message);
 }
 
 function safeHost(rawUrl: string): string {

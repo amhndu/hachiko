@@ -1,0 +1,38 @@
+{
+  "name": "hachiko",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "@ai-sdk/provider": "^4.0.22",
+    "@ai-sdk/react": "^4.0.131",
+    "@cloudflare/ai-chat": "^0.12.1",
+    "@cloudflare/puppeteer": "^1.4.0",
+    "acorn": "^8.19.0",
+    "agents": "^0.26.0",
+    "ai": "^7.0.128",
+    "cron-schedule": "^6.0.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.62.5",
+    "@cloudflare/workers-types": "^5.20261005.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "puppeteer-core": "^25.12.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3",
+    "wrangler": "^4.147.0"
+  }
+}

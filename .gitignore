@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# wrangler / miniflare local state
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+
+# test and tool output
+coverage/
+.playwright-mcp/
+*.log
+npm-debug.log*
+
+# editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

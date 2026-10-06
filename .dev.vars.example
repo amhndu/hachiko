@@ -1,0 +1,2 @@
+# Optional: Discord-compatible webhook for notifications.
+NOTIFY_WEBHOOK_URL=

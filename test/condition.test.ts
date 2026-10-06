@@ -77,6 +77,12 @@ describe("evaluateCondition", () => {
 		expect(evaluateCondition(c, values, { ...ctx, prev: { launchDate: "2026-09-30" } })).toBe(true);
 	});
 
+	it("changed counts a value appearing after an empty stretch, not one disappearing", () => {
+		const c = all({ left: f("launchDate"), op: "changed" });
+		expect(evaluateCondition(c, values, { ...ctx, prev: { launchDate: null } })).toBe(true);
+		expect(evaluateCondition(c, { ...values, launchDate: null }, { ...ctx, prev: { launchDate: "2026-10-12" } })).toBe(false);
+	});
+
 	it("prev operands compare against the last good run", () => {
 		const c = all({ left: f("price"), op: "lt", right: { kind: "prev", name: "price" } });
 		expect(evaluateCondition(c, values, { ...ctx, prev: { price: 299 } })).toBe(true);

@@ -195,9 +195,12 @@ function holds(clause: Clause, values: JsonObject, ctx: ConditionCtx): boolean {
 	if (clause.op === "exists") return left !== null;
 	if (clause.op === "missing") return left === null;
 	if (clause.op === "changed") {
+		// Needs a baseline run. A value appearing after an empty stretch
+		// (null -> value) is a change; a value disappearing is not -- that is
+		// what "missing" is for.
 		if (!ctx.prev || clause.left.kind !== "field") return false;
 		const before = aggregate(ctx.prev[clause.left.name], clause.left.agg);
-		return before !== null && left !== null && !same(left, before);
+		return left !== null && !same(left, before);
 	}
 	const right = clause.right ? resolve(clause.right, values, ctx) : null;
 	// A missing value satisfies nothing: an optional field that is absent

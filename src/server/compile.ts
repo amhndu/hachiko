@@ -42,8 +42,9 @@ A watch spec is JSON. Everything in it is data; nothing is executed.
   agg (first | min | max | count) turns a list field (all: true) into one value.
   Ops: lt lte gt gte (two numbers or two dates), eq ne (same type),
   contains not_contains (text field vs a text value, case-insensitive),
-  and the one-operand ops changed (the field differs from the last good run; false on the
-  first run), exists, missing (no right operand).
+  and the one-operand ops changed (the field has a value that differs from the last good run,
+  including a value appearing after none; false on the first run), exists, missing (no right
+  operand).
   Examples:
     price under 300:  { mode: "all", clauses: [{ left: { kind: "field", name: "price" }, op: "lt", right: { kind: "value", value: 300 } }] }
     date changed and still in the future:  { mode: "all", clauses: [
@@ -59,6 +60,13 @@ Selector rules:
 - Prefer stable hooks (ids, itemprop, data-testid, meta tags) over deep positional paths.
 - Set anchor whenever a label sits next to the value: it is how drift is detected.
 - Read the value, not its label: the selector should point at the element holding the value.
+- If a value only appears sometimes (a sale price, a "back in stock" badge), make it
+  required: false -- a missing optional value makes its comparisons false, not drift -- and
+  also read a required field from the same area of the page (eg the regular price), so a
+  redesign that moves the area is still caught.
+- If the user cares about a value that can be temporarily absent but must come back (a launch
+  date that may read "to be announced"), keep it required: an absent value is reported, and
+  "changed" still compares against the last good value once it returns.
 `.trim();
 
 const CompileOutput = z.object({

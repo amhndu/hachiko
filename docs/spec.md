@@ -224,8 +224,10 @@ Browser Run's remote Chrome.
     case-insensitively.
   - `contains`, `not_contains`: a text field (or text list) against a
     text value, case-insensitive.
-  - `changed`: one field operand. True when the value differs from the
-    last ok run; false on the first run.
+  - `changed`: one field operand. True when the field has a value that
+    differs from the last ok run, including a value appearing after none;
+    false on the first run, and false when a value disappears (that is
+    `missing`).
   - `exists`, `missing`: one field operand. Non-null or null.
 - **Checked on save** (`checkCondition`, called by `validateSpec`):
   unknown fields, type mismatches, a missing or extra right operand,
@@ -239,6 +241,77 @@ Browser Run's remote Chrome.
   operators. There are no loops, calls, regexes, or recursion, so no
   input can make it run long. This interpreter is what the brief calls
   the sandbox, and the limits are structural.
+
+### Expressiveness: the brief's two use cases
+
+Both are tested end to end against real markup in `test/usecases.test.ts`.
+
+**"Notify me when product X has a sale price less than Y"** (Y = 300):
+
+```jsonc
+"fields": [
+  { "name": "price", "selector": ".price-box .price", "type": "number" },   // required
+  { "name": "salePrice", "selector": ".price-box .sale", "type": "number",
+    "required": false, "anchor": "Sale price" }                             // only during a sale
+],
+"condition": { "mode": "all", "clauses": [
+  { "left": { "kind": "field", "name": "salePrice" }, "op": "lt",
+    "right": { "kind": "value", "value": 300 } } ] }
+```
+
+With no sale running, `salePrice` is null and the clause is false: not a
+match, and not drift. The required `price` field from the same box is
+what catches a redesign while no sale runs. An optional field alone could
+go quietly null forever, so the compiler is told to always pair one this
+way. Variant: "the lowest price shown is under Y" is one field with
+`all: true` and `agg: "min"`.
+
+**"Notify me when the ISRO launch date on
+https://lvg.shar.gov.in/VSCREGISTRATION/index.jsp is updated and is in
+the future":**
+
+```jsonc
+"fields": [
+  { "name": "launchDate", "selector": "#dividleft font[color=\"blue\"]", "type": "date",
+    "anchor": "LAUNCH SCHEDULED" },          // "on 04th September 2026, Friday at 02:55 AM"
+  { "name": "mission", "selector": "#dividleft font[color=\"white\"]", "type": "text" }
+],
+"condition": { "mode": "all", "clauses": [
+  { "left": { "kind": "field", "name": "launchDate" }, "op": "changed" },
+  { "left": { "kind": "field", "name": "launchDate" }, "op": "gt", "right": { "kind": "today" } } ] },
+"summary": "{mission} launch is now {launchDate} (was {prev.launchDate})"
+```
+
+- The first run only sets the baseline.
+- A later run where the date moved to a future day matches. A date
+  moved into the past does not, and neither does an unchanged date.
+- The page also carries an older copy of the date inside an HTML
+  comment; the extractor reads rendered text, so that copy is never
+  seen.
+- The date stays required. If the page says "to be announced", the
+  watch reports drift and then `broken` (loud, once). It does not go
+  quietly null. When a date returns, `changed` compares it against the
+  last good date, because broken runs never overwrite `prev`.
+- The launch time ("02:55 AM", with no timezone on the page) is not
+  read; dates are compared by day.
+
+### What it cannot say, and the CEL option
+
+The language deliberately has no arithmetic, no nesting beyond one
+all/any level, and no string functions. So these are out of reach:
+- "dropped 20% below the last price" (`price < prev.price * 0.8`);
+- "(A and B) or C";
+- "the title matches a pattern".
+
+If a real use case needs them, the replacement is **CEL** (Common
+Expression Language), not JS. CEL is declarative and non-Turing-complete
+(no loops, no unbounded recursion), it type-checks before running, and
+models write it well. `@marcbachmann/cel-js` has no dependencies and
+runs in Workers. It would replace `condition` with a CEL string over
+`v`, `prev` and `today`, type-checked against the fields on save
+exactly as now. Not adopted (2026-10-06): both use cases in the brief
+fit the current format, and the clause list is easier to validate,
+show in the UI, and repair.
 
 ## 8. Scheduling
 

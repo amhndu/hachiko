@@ -1,36 +1,14 @@
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
-import puppeteer, { type Browser, type Page } from "puppeteer-core";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { Outline, RawField } from "../src/server/browse";
-import { implausible } from "../src/server/health";
-import { BOXES_SRC, EXTRACT_SRC, OUTLINE_SRC } from "../src/server/inpage";
-import { LIMITS } from "../src/server/limits";
+import { describe, expect, it } from "vitest";
 import type { ConditionCtx } from "../src/server/condition";
 import { evaluate } from "../src/server/evaluate";
-import { validateSpec, type Field, type WatchSpec } from "../src/server/spec";
+import { implausible } from "../src/server/health";
+import { BOXES_SRC } from "../src/server/inpage";
+import { LIMITS } from "../src/server/limits";
+import { validateSpec, type WatchSpec } from "../src/server/spec";
+import { HAS_CHROMIUM, useChromium } from "./browser";
 
 // The in-page scripts against a real Chromium, and the drift/heal decision
 // logic against a page before and after a redesign.
-
-const CHROMIUM = process.env.CHROMIUM_PATH ?? "/usr/bin/chromium";
-const fixture = (name: string) => `file://${resolve(__dirname, "fixtures", name)}`;
-
-let browser: Browser;
-let page: Page;
-
-async function load(name: string) {
-	await page.goto(fixture(name));
-}
-async function extract(fields: Field[]): Promise<Record<string, RawField>> {
-	const args = fields.map((f) => ({ name: f.name, selector: f.selector, attr: f.attr }));
-	return page.evaluate(`(${EXTRACT_SRC})(${JSON.stringify(args)}, ${LIMITS.maxFieldTextLen}, ${LIMITS.maxMatchesPerField})`) as Promise<
-		Record<string, RawField>
-	>;
-}
-async function outline(): Promise<Outline> {
-	return page.evaluate(`(${OUTLINE_SRC})(${LIMITS.outlineMaxItems}, ${LIMITS.outlineMaxChars})`) as Promise<Outline>;
-}
 
 const ctx: ConditionCtx = { now: "2026-10-05T12:00:00Z", prev: null };
 
@@ -48,14 +26,8 @@ const shopSpec: WatchSpec = validateSpec({
 	notifyOn: "transition",
 });
 
-describe.skipIf(!existsSync(CHROMIUM))("in-page scripts (real Chromium)", () => {
-	beforeAll(async () => {
-		browser = await puppeteer.launch({ executablePath: CHROMIUM, args: ["--no-sandbox"] });
-		page = await browser.newPage();
-	});
-	afterAll(async () => {
-		await browser?.close();
-	});
+describe.skipIf(!HAS_CHROMIUM)("in-page scripts (real Chromium)", () => {
+	const { page, load, extract, outline } = useChromium();
 
 	it("outline lists meta data and visible text with unique selectors", async () => {
 		await load("shop-v1.html");
@@ -66,14 +38,14 @@ describe.skipIf(!existsSync(CHROMIUM))("in-page scripts (real Chromium)", () => 
 		expect(o.items.some((i) => i.text === "hidden text")).toBe(false);
 		for (const item of o.items) {
 			if (item.attr) continue;
-			const n = await page.evaluate((s) => document.querySelectorAll(s).length, item.sel);
+			const n = await page().evaluate((s) => document.querySelectorAll(s).length, item.sel);
 			expect(n, item.sel).toBe(1);
 		}
 	});
 
 	it("picker boxes carry page coordinates and unique selectors", async () => {
 		await load("shop-v1.html");
-		const boxes = (await page.evaluate(`(${BOXES_SRC})(${LIMITS.pickerMaxBoxes}, ${LIMITS.pickerMaxHeight})`)) as {
+		const boxes = (await page().evaluate(`(${BOXES_SRC})(${LIMITS.pickerMaxBoxes}, ${LIMITS.pickerMaxHeight})`)) as {
 			width: number;
 			height: number;
 			items: { sel: string; text: string; x: number; y: number; w: number; h: number }[];

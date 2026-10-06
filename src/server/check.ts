@@ -1,42 +1,25 @@
 import type { JsonObject } from "./json";
 import { extract, outline, withPage, type Outline, type RawField } from "./browse";
 import { compileSpec, proposeHeal } from "./compile";
-import { assess, implausible, type Problem } from "./health";
+import type { ConditionCtx } from "./condition";
+import { evaluate, type Evaluation } from "./evaluate";
+import { implausible, type EvalOutput, type Problem } from "./health";
 import { LIMITS } from "./limits";
-import { runSandbox, type PredicateCtx, type SandboxOutput } from "./sandbox";
 import { SpecError, validateSpec, type WatchSpec } from "./spec";
 
-// The check pipeline, shared by the scheduled workflow and the interactive
+// The check pipeline (everything with I/O), shared by the scheduled workflow and the interactive
 // dry run. Each function is one durable step's worth of work.
-
-export type Evaluation = {
-	raw: Record<string, RawField>;
-	out: SandboxOutput;
-	problems: Problem[];
-};
 
 export async function observe(env: Env, spec: WatchSpec): Promise<Record<string, RawField>> {
 	return withPage(env, spec.url, spec.waitFor, (page) => extract(page, spec.fields));
 }
 
-export async function evaluate(
-	env: Env,
-	spec: WatchSpec,
-	raw: Record<string, RawField>,
-	ctx: PredicateCtx,
-): Promise<Evaluation> {
-	const out = await runSandbox(env, spec.predicate, { fields: spec.fields, raw, ctx });
-	return { raw, out, problems: assess(spec.fields, raw, out) };
-}
-
-export async function dryRun(env: Env, spec: WatchSpec, ctx: PredicateCtx): Promise<Evaluation> {
-	return evaluate(env, spec, await observe(env, spec), ctx);
+export async function dryRun(env: Env, spec: WatchSpec, ctx: ConditionCtx): Promise<Evaluation> {
+	return evaluate(spec, await observe(env, spec), ctx);
 }
 
 export function describeProblems(e: Evaluation): string[] {
-	const list = e.problems.map((p) => `${p.field}: ${p.kind}: ${p.detail}`);
-	if (e.out.predicateError) list.push(`predicate threw: ${e.out.predicateError}`);
-	return list;
+	return e.problems.map((p) => `${p.field}: ${p.kind}: ${p.detail}`);
 }
 
 export type HealResult =
@@ -54,7 +37,7 @@ export async function heal(
 		spec: WatchSpec;
 		problems: Problem[];
 		lastGood: JsonObject | null;
-		ctx: PredicateCtx;
+		ctx: ConditionCtx;
 	},
 ): Promise<HealResult> {
 	return withPage(env, args.spec.url, args.spec.waitFor, async (page) => {
@@ -78,7 +61,7 @@ export async function heal(
 				continue;
 			}
 			const raw = await extract(page, candidate.fields);
-			const evaluation = await evaluate(env, candidate, raw, args.ctx);
+			const evaluation = evaluate(candidate, raw, args.ctx);
 			const reasons = describeProblems(evaluation);
 			const healedNames = new Set(args.problems.map((p) => p.field));
 			for (const f of candidate.fields) {
@@ -101,7 +84,7 @@ export type Draft = {
 	name: string;
 	explanation: string;
 	spec: WatchSpec;
-	preview: { values: JsonObject; result: SandboxOutput["result"]; problems: string[] };
+	preview: { values: JsonObject; result: EvalOutput["result"]; problems: string[] };
 };
 
 // Intent -> spec -> dry run against the live page; one retry with the dry
@@ -112,7 +95,7 @@ export async function draftWatch(
 	args: { url: string; intent: string; hint?: string; now: string },
 ): Promise<Draft> {
 	const view: Outline = await withPage(env, args.url, undefined, (page) => outline(page));
-	const ctx: PredicateCtx = { now: args.now, prev: null, lastMatch: null, url: args.url };
+	const ctx: ConditionCtx = { now: args.now, prev: null };
 	let previous: { spec: WatchSpec; problems: string[]; values: JsonObject } | undefined;
 	let last: Draft | undefined;
 	for (let attempt = 0; attempt < 2; attempt++) {

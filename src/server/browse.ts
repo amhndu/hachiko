@@ -1,12 +1,45 @@
 import puppeteer, { type Page } from "@cloudflare/puppeteer";
+import { z } from "zod";
 import { BOXES_SRC, EXTRACT_SRC, OUTLINE_SRC } from "./inpage";
+import { checkShape } from "./json";
 import { LIMITS } from "./limits";
 import type { Field } from "./spec";
 
-export type RawItem = { text: string; attr: string | null; context: string };
-export type RawField = { count: number; items: RawItem[]; error?: string };
-export type OutlineItem = { sel: string; attr?: string; text: string };
-export type Outline = { title: string; items: OutlineItem[] };
+// Results from page.evaluate run in the page's realm, where the site's own
+// scripts could have patched the DOM APIs. They are checked on the way out.
+export const RawItemSchema = z.object({
+	text: z.string(),
+	attr: z.string().nullable(),
+	context: z.string(),
+});
+export const RawFieldSchema = z.object({
+	count: z.number().int().nonnegative(),
+	items: z.array(RawItemSchema).max(LIMITS.maxMatchesPerField),
+	error: z.string().optional(),
+});
+export const RawResultSchema = z.record(z.string(), RawFieldSchema);
+const OutlineSchema = z.object({
+	title: z.string(),
+	items: z.array(z.object({ sel: z.string(), attr: z.string().optional(), text: z.string() })),
+});
+const PickerBoxSchema = z.object({
+	sel: z.string(),
+	text: z.string(),
+	x: z.number(),
+	y: z.number(),
+	w: z.number(),
+	h: z.number(),
+});
+const BoxesSchema = z.object({
+	width: z.number().positive(),
+	height: z.number().positive(),
+	items: z.array(PickerBoxSchema).max(LIMITS.pickerMaxBoxes),
+});
+
+export type RawItem = z.infer<typeof RawItemSchema>;
+export type RawField = z.infer<typeof RawFieldSchema>;
+export type Outline = z.infer<typeof OutlineSchema>;
+export type OutlineItem = Outline["items"][number];
 
 export class FetchError extends Error {
 	constructor(message: string) {
@@ -54,15 +87,17 @@ export async function withPage<T>(
 
 export async function extract(page: Page, fields: Field[]): Promise<Record<string, RawField>> {
 	const args = fields.map((f) => ({ name: f.name, selector: f.selector, attr: f.attr }));
-	return (await page.evaluate(
+	const result: unknown = await page.evaluate(
 		`(${EXTRACT_SRC})(${JSON.stringify(args)}, ${LIMITS.maxFieldTextLen}, ${LIMITS.maxMatchesPerField})`,
-	)) as Record<string, RawField>;
+	);
+	return checkShape(RawResultSchema, result, "extract");
 }
 
 export async function outline(page: Page): Promise<Outline> {
-	return (await page.evaluate(
+	const result: unknown = await page.evaluate(
 		`(${OUTLINE_SRC})(${LIMITS.outlineMaxItems}, ${LIMITS.outlineMaxChars})`,
-	)) as Outline;
+	);
+	return checkShape(OutlineSchema, result, "outline");
 }
 
 // The outline as the models see it: one element per line.
@@ -81,15 +116,16 @@ export function renderOutline(o: Outline, maxChars: number = LIMITS.outlineMaxCh
 	return lines.join("\n");
 }
 
-export type PickerBox = { sel: string; text: string; x: number; y: number; w: number; h: number };
+export type PickerBox = z.infer<typeof PickerBoxSchema>;
 export type PickerSnapshot = { image: string; width: number; height: number; boxes: PickerBox[] };
 
 // A screenshot of the top of the page plus the boxes of everything on it
 // that carries text. The user's browser never loads the third-party page.
 export async function pickerSnapshot(page: Page): Promise<PickerSnapshot> {
-	const { width, height, items } = (await page.evaluate(
+	const boxes: unknown = await page.evaluate(
 		`(${BOXES_SRC})(${LIMITS.pickerMaxBoxes}, ${LIMITS.pickerMaxHeight})`,
-	)) as { width: number; height: number; items: PickerBox[] };
+	);
+	const { width, height, items } = checkShape(BoxesSchema, boxes, "picker boxes");
 	const shot = (await page.screenshot({
 		type: "jpeg",
 		quality: 60,

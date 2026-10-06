@@ -7,31 +7,52 @@ import type { Problem } from "./health";
 import { LIMITS } from "./limits";
 import { FieldSchema, WatchSpecSchema, type Field, type WatchSpec } from "./spec";
 
+// The offline env (CLOUDFLARE_ENV=offline) has no AI binding; say so plainly.
+export function workersAI(env: Env): Ai {
+	if (!env.AI) throw new Error("Workers AI is not bound (offline mode); chat, compile and heal need it");
+	return env.AI;
+}
+
 export function compilerModel(env: Env) {
-	return createAI({ binding: env.AI }).languageModel(env.COMPILER_MODEL);
+	return createAI({ binding: workersAI(env) }).languageModel(env.COMPILER_MODEL);
 }
 
 const SPEC_RULES = `
-A watch spec is JSON:
+A watch spec is JSON. Everything in it is data; nothing is executed.
 - url: the page.
 - waitFor (optional): CSS selector to wait for before reading, for pages that render late.
 - fields (1-${LIMITS.maxFields}): values read off the page. Each has
   name (identifier), description (what it means, in words),
   selector (CSS, or "xpath:<expr>"), type (text | number | date | exists),
-  and optionally attr (read an attribute, eg "content" for meta tags),
-  pattern (regex; first capture group is kept), dateOrder (dmy | mdy | ymd, for numeric dates),
+  and optionally:
+  attr (read an attribute, eg "content" for meta tags),
+  after / before (literal text markers: keep only what follows "after" and precedes "before",
+    eg after "Launch Date:" on "Launch Date: 12-10-2026 (tentative)" with before "("),
+  dateOrder (dmy | mdy | ymd, for numeric dates like 05/10/2026),
   all (collect every match as a list), required (default true),
   anchor (short, stable label text that appears next to the value, eg "Launch Date").
-- predicate: a JS arrow function (v, ctx) => ({ match: boolean, summary: string }).
-  v holds the coerced field values: numbers are numbers, dates are ISO strings
-  (YYYY-MM-DD, comparable as strings), exists is a boolean, all-fields are arrays.
-  ctx = { now (ISO timestamp), prev (last good v, or null on the first run), lastMatch, url }.
-  The predicate must be pure: no fetch, no timers, no Date.now(), no new Date() without
-  arguments, no Math.random. Use ctx.now for the current time. Keep it short.
-  summary is one human sentence stating the observed values, eg "Price is $42 (target < $50)".
-  For "when X changes" conditions compare against ctx.prev and return match:false when prev is null.
-- notifyOn: "transition" (notify when match goes false -> true; the default) or
-  "every-match" (notify on every run that matches).
+  Numbers read the first number in the text ("In stock (22 available)" -> 22, "Rs. 45,000" -> 45000).
+  Dates read the first date in the text and become YYYY-MM-DD. exists is true when the selector matches.
+- condition: { mode: "all" | "any", clauses: [ ...1-${LIMITS.maxConditionClauses} ] }.
+  A clause is { left, op, right }. Operands:
+    { kind: "field", name, agg? }   the field's value now
+    { kind: "prev", name, agg? }    its value on the last good run (null on the first run)
+    { kind: "value", value }        a literal number, string or boolean ("2026-10-12" is a date)
+    { kind: "today", offsetDays? }  today's date (UTC), optionally shifted
+  agg (first | min | max | count) turns a list field (all: true) into one value.
+  Ops: lt lte gt gte (two numbers or two dates), eq ne (same type),
+  contains not_contains (text field vs a text value, case-insensitive),
+  and the one-operand ops changed (the field differs from the last good run; false on the
+  first run), exists, missing (no right operand).
+  Examples:
+    price under 300:  { mode: "all", clauses: [{ left: { kind: "field", name: "price" }, op: "lt", right: { kind: "value", value: 300 } }] }
+    date changed and still in the future:  { mode: "all", clauses: [
+      { left: { kind: "field", name: "launchDate" }, op: "changed" },
+      { left: { kind: "field", name: "launchDate" }, op: "gt", right: { kind: "today" } } ] }
+- summary: one human sentence with placeholders {field}, {prev.field} and {today},
+  eg "Price is {price} (target under 300)" or "Launch date is {launchDate} (was {prev.launchDate})".
+- notifyOn: "transition" (notify when the condition goes false -> true; the default) or
+  "every-match" (notify on every run where it holds).
 
 Selector rules:
 - Prefer selectors from the outline; they were checked unique on the live page.
@@ -83,11 +104,19 @@ export async function compileSpec(
 }
 
 // The healer may move selectors. It may not touch names, types, descriptions,
-// the predicate, or the URL: those are the user's intent, and a heal that
+// the condition, or the URL: those are the user's intent, and a heal that
 // changed them would be silently answering a different question.
 const HealPatch = z.object({
 	fields: z.array(
-		FieldSchema.pick({ name: true, selector: true, attr: true, pattern: true, anchor: true, dateOrder: true }),
+		FieldSchema.pick({
+			name: true,
+			selector: true,
+			attr: true,
+			after: true,
+			before: true,
+			anchor: true,
+			dateOrder: true,
+		}),
 	),
 	note: z.string().max(300).describe("what moved on the page, in one sentence"),
 });
@@ -130,7 +159,8 @@ export async function proposeHeal(
 			...f,
 			selector: p.selector,
 			attr: p.attr,
-			pattern: p.pattern,
+			after: p.after,
+			before: p.before,
 			anchor: p.anchor,
 			dateOrder: p.dateOrder ?? f.dateOrder,
 		};

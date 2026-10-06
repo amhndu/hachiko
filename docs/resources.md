@@ -27,24 +27,46 @@ ie lost.
   `createAI` from `agents/models/ai-sdk` (beta). Its
   `languageModel(id)` takes an id string from config.
 - **https://developers.cloudflare.com/dynamic-workers/** -- the
-  sandbox. `globalOutbound: null` cuts the network, and
-  `limits: { cpuMs, subRequests }` (the usage/limits page) is the hard
-  cap. `get(id, cb)` caches by id, so the id is a hash of the predicate.
-  A Durable Object can have 10 distinct Dynamic Workers in flight.
+  original sandbox, dropped 2026-10-06. It is a good primitive
+  (`globalOutbound: null`, `limits: { cpuMs, subRequests }`), but it is
+  **Paid-only** (see its pricing page), and local workerd does not
+  enforce `cpuMs`. Kept here as the answer if hachiko ever needs to run
+  real user code on the Paid plan.
+- **https://github.com/justjake/quickjs-emscripten** -- QuickJS in
+  WebAssembly, which runs in Workers and on the Free plan. It was tried
+  as the replacement sandbox and dropped. Its interrupt handler fires
+  every few thousand bytecode ops, so a loop over expensive built-ins
+  (`'x'.repeat(1e5)`) ran for seconds between checks; and `Date.now()`
+  does not advance during CPU work in Workers, so a wall-clock deadline
+  cannot help. The declarative condition language made a sandbox
+  unnecessary.
 - **https://developers.cloudflare.com/browser-run/** -- what used to
   be called Browser Rendering. It offers Quick Actions (`/scrape`,
   `/content`, `/json`) and Puppeteer/Playwright sessions. Picked
   Puppeteer over `/scrape` because a check needs the extract, the
   outline, and the screenshot in one session, plus `waitFor`. Pricing:
-  10 browser-hours a month on Paid, then $0.09/h. That cost is why the
-  minimum interval is 15 min and images are blocked during checks.
+  **10 browser-minutes a day and 3 concurrent browsers on Free**; 10
+  browser-hours a month on Paid, then $0.09/h. The Free quota is why the
+  limits are 5 watches at an hourly minimum, and why images are blocked
+  during checks.
 - **https://developers.cloudflare.com/browser-run/reference/browser-binding-api/**
   -- the `browser` binding. Under `vite dev` with `remote: false` it
   drives a local Chrome.
-- **https://developers.cloudflare.com/workers-ai/models/** -- where
-  `kimi-k2.6` (multi-turn tool calling, 262k context) and `glm-5.3`
-  (structured output, function calling) came from. They were picked
-  from the catalog, not benchmarked.
+- **https://developers.cloudflare.com/workers-ai/models/** -- where the
+  models came from. The first picks (`kimi-k2.6`, `glm-5.3`) turned out
+  to need paid billing even on the Free plan; the pricing page lists
+  which models do.
+- **https://developers.cloudflare.com/workers-ai/platform/pricing/** --
+  10,000 free neurons a day, and per-model neuron rates. A compile
+  (about 4k input and 1k output tokens) costs roughly 300 neurons on
+  `llama-3.3-70b-instruct-fp8-fast`; a chat turn costs a few dozen on
+  `glm-4.7-flash`.
+- **https://developers.cloudflare.com/workers-ai/features/json-mode/**
+  -- the models with JSON mode. Llama 3.3 70B is on it, which is why it
+  compiles and heals.
+- **https://developers.cloudflare.com/workflows/reference/limits/** --
+  Workflows on Free: 10 ms CPU per step, 100 concurrent instances,
+  100k executions a day.
 
 ## Prior art
 

@@ -8,11 +8,11 @@ Watches can be arbitrary, including arbitrary conditions ("notify me when produc
 
 ## How it works
 
-The user intent is converted and compiled into a deterministic query including CSS selectors, DOM selectors (XPath), and a combination of JS code. It is saved as a durable watch and cron.
+The user intent is compiled into a deterministic, declarative query: CSS or XPath selectors, a type for each value (text, number, date, exists), optional literal `after` / `before` markers, and a condition such as "price < 300" or "launch date changed and is after today". It is saved as a durable watch and cron.
 
-After that, routine checks never call a model. A scheduled check loads the page, reads the values, and runs the condition in a sandbox.
+After that, routine checks never call a model. A scheduled check loads the page, reads the values, and evaluates the condition.
 
-Conditions must be simple and hard-limits are placed on the sandbox executing them.
+Nothing model-written is ever executed. The condition is data: at most 8 clauses joined by "all" or "any", each comparing a field to a value, its previous value, or today. A small interpreter evaluates it, and it is type-checked against the fields when the watch is saved. That interpreter is the sandbox, and it can only do a bounded amount of work.
 
 Watchers are self-healing, so if the upstream changes format, we don't silently fail. A check notices the change and tries to find the moved values again. If it can't, it reports itself broken. A broken selector is never reported as "condition not met".
 
@@ -25,7 +25,7 @@ The user experience includes a simple UI to see / manage existing watches. Users
 | `Hachiko` agent | Durable Objects (Agents SDK) | per-user chat, watch registry, cron, notifications |
 | `CheckWorkflow` | Workflows | one durable, retryable run per check: observe, evaluate, heal, record |
 | scraper | Browser Run | loads pages, reads selectors, screenshots for the picker |
-| sandbox | Dynamic Workers | runs the generated condition, no network, CPU cap |
+| condition evaluator | Workers (in-process) | declarative condition, type-checked on save; no code runs |
 | models | Workers AI | orchestrator, compiler (sentence to spec), healer |
 
 More in [docs/design.md](docs/design.md), [docs/spec.md](docs/spec.md) and [docs/resources.md](docs/resources.md).
@@ -34,15 +34,18 @@ More in [docs/design.md](docs/design.md), [docs/spec.md](docs/spec.md) and [docs
 
 Enforced in `src/server/limits.ts`:
 
-- 25 watches per user, 8 fields per watch
-- Conditions are at most 2000 chars
-- Sandbox: 50 ms CPU, 2 s wall clock, no network
-- Minimum schedule interval is 15 min, cron is in UTC
+- 5 watches per user, 8 fields per watch
+- Conditions: at most 8 clauses, fixed operators, no code
+- Minimum schedule interval is 1 hour, cron is in UTC
 - At most 2 heal attempts per run, 3 heals per watch per day
+
+These are sized for the Workers Free plan. The tightest quota is Browser Run's 10 browser-minutes a day: a check costs roughly 3-5 s, so 5 hourly watches use about 8 minutes and leave room for drafts, heals and the picker. Workers AI's 10,000 free neurons a day cover roughly 25-30 compiles or heals with the default models. On the Paid plan, raise the numbers in `limits.ts`.
+
+Not yet measured on a deployed Free account: the Free plan's 10 ms CPU limit per invocation and per Workflow step. Checks are I/O-bound and the evaluator is tiny, but the chat turns and the picker's screenshot have not been profiled against it.
 
 ## Setup
 
-Needs Node.js 20+, pnpm, and a Cloudflare account on the **Workers Paid** plan (Dynamic Workers). Chromium is only needed for the browser tests.
+Needs Node.js 20+, pnpm, and a Cloudflare account. Everything runs on the **Workers Free** plan: Workers, Durable Objects (SQLite), Workflows, Browser Run and Workers AI all have free tiers, and the default models do not require paid billing. Chromium is only needed for the browser tests.
 
 ```sh
 pnpm install
@@ -72,20 +75,24 @@ Offline mode has no chat, but `testSpec(spec)` and `createFromSpec({ name, inten
 
 | name | where | default |
 | --- | --- | --- |
-| `ORCHESTRATOR_MODEL` | `wrangler.jsonc` var | `@cf/moonshotai/kimi-k2.6` (needs multi-turn tool calling) |
-| `COMPILER_MODEL` | `wrangler.jsonc` var | `@cf/zai-org/glm-5.3` (needs structured output) |
+| `ORCHESTRATOR_MODEL` | `wrangler.jsonc` var | `@cf/zai-org/glm-4.7-flash` (needs function calling; free tier) |
+| `COMPILER_MODEL` | `wrangler.jsonc` var | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` (needs JSON mode; free tier) |
 | `NOTIFY_WEBHOOK_URL` | secret | unset, Discord-compatible, gets `{ "content": "..." }` |
 | `CLOUDFLARE_ENV` | shell | `offline` skips models |
 | `CHROMIUM_PATH` | shell | `/usr/bin/chromium`, browser tests skip if missing |
 
+Some Workers AI models need paid billing even on the Free plan (`kimi-k2.6`, `glm-5.x`, `deepseek-v4-*`); keep to models without that note if you swap them.
+
 Locally, copy `.dev.vars.example` to `.dev.vars`. In production: `pnpm exec wrangler secret put NOTIFY_WEBHOOK_URL`.
+
+## Auth
 
 None yet. The UI connects to a single agent instance named `me`, so anyone who can reach a deployment can use it. Put it behind Cloudflare Access, or add auth, before deploying publicly.
 
 ## Layout
 
 ```
-src/server/   agent, workflow, browser, sandbox, compiler, limits
+src/server/   agent, workflow, browser, extraction, condition, compiler, limits
 src/client/   React UI (Vite)
 test/         vitest unit tests and HTML fixtures
 docs/         design notes, spec, references

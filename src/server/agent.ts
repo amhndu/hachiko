@@ -1,13 +1,15 @@
-import type { JsonObject } from "./json";
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { callable } from "agents";
 import { createAI } from "agents/models/ai-sdk";
 import { convertToModelMessages, pruneMessages, stepCountIs, streamText, tool, type UIMessage } from "ai";
 import { z } from "zod";
 import { outline, pickerSnapshot, renderOutline, withPage } from "./browse";
-import { describeProblems, draftWatch, dryRun, type Draft } from "./check";
+import { describeProblems, draftWatch, dryRun } from "./check";
+import { workersAI } from "./compile";
+import { describeCondition } from "./condition";
+import { JsonObjectSchema, parseJson, type JsonObject } from "./json";
 import { LIMITS } from "./limits";
-import { checkCron, checkUrl, SpecError, validateSpec, type WatchSpec } from "./spec";
+import { checkCron, checkUrl, SpecError, validateSpec, WatchSpecSchema, type WatchSpec } from "./spec";
 import type { CheckParams, RunOutcome, RunReport } from "./workflow";
 
 export type Health = "new" | "ok" | "healed" | "broken" | "error";
@@ -80,7 +82,22 @@ type RunRow = {
 	finished_at: string;
 };
 
-type StoredDraft = Draft & { cron: string; intent: string; replaceWatchId: string | null };
+// Drafts round-trip through SQLite as JSON; parsed back through this schema.
+const StoredDraftSchema = z.object({
+	name: z.string(),
+	explanation: z.string(),
+	spec: WatchSpecSchema,
+	preview: z.object({
+		values: JsonObjectSchema,
+		result: z.object({ match: z.boolean(), summary: z.string() }).nullable(),
+		problems: z.array(z.string()),
+	}),
+	cron: z.string(),
+	intent: z.string(),
+	replaceWatchId: z.string().nullable(),
+});
+type StoredDraft = z.infer<typeof StoredDraftSchema>;
+const ProblemsSchema = z.array(z.string());
 
 const SYSTEM = `You are hachiko, an assistant that creates and manages web page watches.
 A watch loads a page on a schedule, reads values with selectors, and runs a small
@@ -171,7 +188,7 @@ export class Hachiko extends AIChatAgent<Env, HachikoState> {
 	// ---- chat ---------------------------------------------------------------
 
 	async onChatMessage() {
-		const model = createAI({ binding: this.env.AI }).languageModel(this.env.ORCHESTRATOR_MODEL);
+		const model = createAI({ binding: workersAI(this.env) }).languageModel(this.env.ORCHESTRATOR_MODEL);
 		const result = streamText({
 			model,
 			system: SYSTEM,
@@ -295,7 +312,7 @@ export class Hachiko extends AIChatAgent<Env, HachikoState> {
 		} catch (e) {
 			return { problems: e instanceof SpecError ? e.problems : [(e as Error).message] };
 		}
-		const ev = await dryRun(this.env, spec, { now: nowIso(), prev: null, lastMatch: null, url: spec.url });
+		const ev = await dryRun(this.env, spec, { now: nowIso(), prev: null });
 		return { values: ev.out.values, result: ev.out.result, problems: describeProblems(ev), raw: ev.raw };
 	}
 
@@ -371,14 +388,15 @@ export class Hachiko extends AIChatAgent<Env, HachikoState> {
 			summaryNow: draft.preview.result?.summary ?? null,
 			problems: draft.preview.problems,
 			fields: draft.spec.fields.map((f) => ({ name: f.name, selector: f.selector, type: f.type })),
-			predicate: draft.spec.predicate,
+			condition: describeCondition(draft.spec.condition),
+			summaryTemplate: draft.spec.summary,
 		};
 	}
 
 	private async saveDraft(draftId: string) {
 		const [row] = this.sql<{ payload: string }>`SELECT payload FROM drafts WHERE id = ${draftId}`;
 		if (!row) return { error: `no draft ${draftId}; drafts expire after ${LIMITS.draftTtlHours}h` };
-		const d = JSON.parse(row.payload) as StoredDraft;
+		const d = parseJson(StoredDraftSchema, row.payload, `draft ${draftId}`);
 		if (d.preview.problems.length > 0) {
 			return { error: "this draft failed its dry run; it cannot be saved", problems: d.preview.problems };
 		}
@@ -462,7 +480,7 @@ export class Hachiko extends AIChatAgent<Env, HachikoState> {
 				version: v.version,
 				reason: v.reason,
 				createdAt: v.created_at,
-				spec: JSON.parse(v.spec) as WatchSpec,
+				spec: parseJson(WatchSpecSchema, v.spec, `watch ${watchId} v${v.version}`),
 			})),
 			runs: runs.map(toRunView),
 		};
@@ -490,8 +508,7 @@ export class Hachiko extends AIChatAgent<Env, HachikoState> {
 			version: w.version,
 			intent: w.intent,
 			spec: this.spec(watchId, w.version),
-			prev: w.last_values ? (JSON.parse(w.last_values) as JsonObject) : null,
-			lastMatch: w.last_match === null ? null : w.last_match === 1,
+			prev: w.last_values ? parseJson(JsonObjectSchema, w.last_values, `watch ${watchId} last values`) : null,
 			healBudget: LIMITS.maxHealsPerDay - healsToday,
 		};
 		const instanceId = await this.runWorkflow("CHECK_WORKFLOW", params);
@@ -606,7 +623,7 @@ export class Hachiko extends AIChatAgent<Env, HachikoState> {
 	private spec(watchId: string, version: number): WatchSpec {
 		const [v] = this.sql<{ spec: string }>`
 			SELECT spec FROM watch_versions WHERE watch_id = ${watchId} AND version = ${version}`;
-		return JSON.parse(v.spec) as WatchSpec;
+		return parseJson(WatchSpecSchema, v.spec, `watch ${watchId} v${version}`);
 	}
 
 	private refresh() {
@@ -622,7 +639,7 @@ export class Hachiko extends AIChatAgent<Env, HachikoState> {
 				health: w.health,
 				version: w.version,
 				spec: this.spec(w.id, w.version),
-				lastValues: w.last_values ? (JSON.parse(w.last_values) as JsonObject) : null,
+				lastValues: w.last_values ? parseJson(JsonObjectSchema, w.last_values, `watch ${w.id} last values`) : null,
 				lastMatch: w.last_match === null ? null : w.last_match === 1,
 				lastSummary: w.last_summary,
 				lastOkAt: w.last_ok_at,
@@ -651,8 +668,8 @@ function toRunView(r: RunRow): RunView {
 		outcome: r.outcome,
 		match: r.match === null ? null : r.match === 1,
 		summary: r.summary,
-		values: r.values_json ? (JSON.parse(r.values_json) as JsonObject) : null,
-		problems: JSON.parse(r.problems) as string[],
+		values: r.values_json ? parseJson(JsonObjectSchema, r.values_json, `run ${r.id} values`) : null,
+		problems: parseJson(ProblemsSchema, r.problems, `run ${r.id} problems`),
 		startedAt: r.started_at,
 		finishedAt: r.finished_at,
 	};

@@ -3,12 +3,12 @@ import { resolve } from "node:path";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Outline, RawField } from "../src/server/browse";
-import { assess, implausible } from "../src/server/health";
-import { EXTRACT_SRC, OUTLINE_SRC } from "../src/server/inpage";
+import { implausible } from "../src/server/health";
+import { BOXES_SRC, EXTRACT_SRC, OUTLINE_SRC } from "../src/server/inpage";
 import { LIMITS } from "../src/server/limits";
-import type { PredicateCtx } from "../src/server/sandbox";
+import type { ConditionCtx } from "../src/server/condition";
+import { evaluate } from "../src/server/evaluate";
 import { validateSpec, type Field, type WatchSpec } from "../src/server/spec";
-import { fakeSandbox } from "./helpers";
 
 // The in-page scripts against a real Chromium, and the drift/heal decision
 // logic against a page before and after a redesign.
@@ -32,7 +32,7 @@ async function outline(): Promise<Outline> {
 	return page.evaluate(`(${OUTLINE_SRC})(${LIMITS.outlineMaxItems}, ${LIMITS.outlineMaxChars})`) as Promise<Outline>;
 }
 
-const ctx: PredicateCtx = { now: "2026-10-05T12:00:00Z", prev: null, lastMatch: null, url: "https://acme.example/x1" };
+const ctx: ConditionCtx = { now: "2026-10-05T12:00:00Z", prev: null };
 
 const shopSpec: WatchSpec = validateSpec({
 	url: "https://acme.example/x1",
@@ -40,7 +40,11 @@ const shopSpec: WatchSpec = validateSpec({
 		{ name: "price", description: "the sale price", selector: "#sale-price", type: "number", anchor: "Sale price" },
 		{ name: "inCart", description: "add to cart button is present", selector: "button.add-to-cart", type: "exists" },
 	],
-	predicate: "(v, ctx) => ({ match: v.price < 300, summary: `Sale price is $${v.price} (target < $300)` })",
+	condition: {
+		mode: "all",
+		clauses: [{ left: { kind: "field", name: "price" }, op: "lt", right: { kind: "value", value: 300 } }],
+	},
+	summary: "Sale price is ${price} (target < $300)",
 	notifyOn: "transition",
 });
 
@@ -67,6 +71,20 @@ describe.skipIf(!existsSync(CHROMIUM))("in-page scripts (real Chromium)", () => 
 		}
 	});
 
+	it("picker boxes carry page coordinates and unique selectors", async () => {
+		await load("shop-v1.html");
+		const boxes = (await page.evaluate(`(${BOXES_SRC})(${LIMITS.pickerMaxBoxes}, ${LIMITS.pickerMaxHeight})`)) as {
+			width: number;
+			height: number;
+			items: { sel: string; text: string; x: number; y: number; w: number; h: number }[];
+		};
+		expect(boxes.width).toBeGreaterThan(0);
+		const price = boxes.items.find((b) => b.text === "$299.00");
+		expect(price?.sel).toBe("#sale-price");
+		expect(price?.w).toBeGreaterThan(0);
+		expect(boxes.items.some((b) => b.text === "hidden text")).toBe(false);
+	});
+
 	it("extracts text, attributes, xpath, and label context", async () => {
 		await load("shop-v1.html");
 		const raw = await extract([
@@ -84,20 +102,16 @@ describe.skipIf(!existsSync(CHROMIUM))("in-page scripts (real Chromium)", () => 
 
 	it("a healthy page evaluates with no problems", async () => {
 		await load("shop-v1.html");
-		const raw = await extract(shopSpec.fields);
-		const out = fakeSandbox(shopSpec, raw, ctx);
-		expect(assess(shopSpec.fields, raw, out)).toEqual([]);
+		const { out, problems } = evaluate(shopSpec, await extract(shopSpec.fields), ctx);
+		expect(problems).toEqual([]);
 		expect(out.result).toEqual({ match: true, summary: "Sale price is $299 (target < $300)" });
 	});
 
 	it("after a redesign the old spec reports drift, never 'no match'", async () => {
 		await load("shop-v2.html");
-		const raw = await extract(shopSpec.fields);
-		const out = fakeSandbox(shopSpec, raw, ctx);
+		const { out, problems } = evaluate(shopSpec, await extract(shopSpec.fields), ctx);
 		expect(out.result).toBeNull();
-		expect(assess(shopSpec.fields, raw, out)).toEqual([
-			{ field: "price", kind: "missing", detail: "#sale-price matched nothing" },
-		]);
+		expect(problems).toEqual([{ field: "price", kind: "missing", detail: "#sale-price matched nothing" }]);
 	});
 
 	it("a heal onto the right element passes every gate", async () => {
@@ -109,9 +123,8 @@ describe.skipIf(!existsSync(CHROMIUM))("in-page scripts (real Chromium)", () => 
 		expect(sel).not.toMatch(/css-/);
 		const healed = validateSpec({ ...shopSpec, fields: [{ ...shopSpec.fields[0], selector: sel }, shopSpec.fields[1]] });
 		// The button moved too; exists-fields are allowed to read false.
-		const raw = await extract(healed.fields);
-		const out = fakeSandbox(healed, raw, { ...ctx, prev: { price: 299, inCart: true } });
-		expect(assess(healed.fields, raw, out)).toEqual([]);
+		const { out, problems } = evaluate(healed, await extract(healed.fields), { ...ctx, prev: { price: 299, inCart: true } });
+		expect(problems).toEqual([]);
 		expect(implausible(healed.fields[0], out.values.price, 299, ctx.now)).toBeNull();
 		expect(out.result?.match).toBe(true);
 	});
@@ -121,13 +134,12 @@ describe.skipIf(!existsSync(CHROMIUM))("in-page scripts (real Chromium)", () => 
 		const o = await outline();
 		const sel = o.items.find((i) => i.text === "$9.99")?.sel;
 		const wrong = validateSpec({ ...shopSpec, fields: [{ ...shopSpec.fields[0], selector: sel }, shopSpec.fields[1]] });
-		const raw = await extract(wrong.fields);
-		const out = fakeSandbox(wrong, raw, ctx);
-		expect(assess(wrong.fields, raw, out).map((p) => p.kind)).toEqual(["anchor-lost"]);
+		const { out, problems } = evaluate(wrong, await extract(wrong.fields), ctx);
+		expect(problems.map((p) => p.kind)).toEqual(["anchor-lost"]);
 		expect(implausible(wrong.fields[0], out.values.price, 299, ctx.now)).toMatch(/10x/);
 	});
 
-	it("the ISRO-style table: a future-date-changed predicate", async () => {
+	it("the ISRO-style table: date changed and still in the future", async () => {
 		await load("launch.html");
 		const spec = validateSpec({
 			url: "https://lvg.shar.gov.in/VSCREGISTRATION/index.jsp",
@@ -141,18 +153,24 @@ describe.skipIf(!existsSync(CHROMIUM))("in-page scripts (real Chromium)", () => 
 					anchor: "Launch Date",
 				},
 			],
-			predicate:
-				"(v, ctx) => ({ match: ctx.prev !== null && v.launchDate !== ctx.prev.launchDate && v.launchDate > ctx.now.slice(0, 10), summary: `Launch date is ${v.launchDate}` + (ctx.prev ? ` (was ${ctx.prev.launchDate})` : '') })",
+			condition: {
+				mode: "all",
+				clauses: [
+					{ left: { kind: "field", name: "launchDate" }, op: "changed" },
+					{ left: { kind: "field", name: "launchDate" }, op: "gt", right: { kind: "today" } },
+				],
+			},
+			summary: "Launch date is {launchDate} (was {prev.launchDate})",
 			notifyOn: "transition",
 		});
 		const raw = await extract(spec.fields);
-		const first = fakeSandbox(spec, raw, ctx);
-		expect(assess(spec.fields, raw, first)).toEqual([]);
-		expect(first.values.launchDate).toBe("2026-10-12");
-		expect(first.result?.match).toBe(false); // no baseline yet
-		const changed = fakeSandbox(spec, raw, { ...ctx, prev: { launchDate: "2026-09-30" } });
-		expect(changed.result).toEqual({ match: true, summary: "Launch date is 2026-10-12 (was 2026-09-30)" });
-		const past = fakeSandbox(spec, raw, { ...ctx, now: "2026-11-01T00:00:00Z", prev: { launchDate: "2026-09-30" } });
-		expect(past.result?.match).toBe(false);
+		const first = evaluate(spec, raw, ctx);
+		expect(first.problems).toEqual([]);
+		expect(first.out.values.launchDate).toBe("2026-10-12");
+		expect(first.out.result?.match).toBe(false); // no baseline yet
+		const changed = evaluate(spec, raw, { ...ctx, prev: { launchDate: "2026-09-30" } });
+		expect(changed.out.result).toEqual({ match: true, summary: "Launch date is 2026-10-12 (was 2026-09-30)" });
+		const past = evaluate(spec, raw, { now: "2026-11-01T00:00:00Z", prev: { launchDate: "2026-09-30" } });
+		expect(past.out.result?.match).toBe(false);
 	});
 });

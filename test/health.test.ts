@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { RawField } from "../src/server/browse";
-import { assess, implausible } from "../src/server/health";
-import type { SandboxOutput } from "../src/server/sandbox";
+import { assess, implausible, type EvalOutput } from "../src/server/health";
 import type { Field } from "../src/server/spec";
 
 const f = (over: Partial<Field>): Field => ({ name: "price", description: "", selector: "#p", type: "number", ...over });
 const raw = (text: string, context = ""): RawField => ({ count: 1, items: [{ text, attr: null, context }] });
-const out = (errors: Record<string, string> = {}): SandboxOutput => ({ values: {}, errors, result: null, predicateError: null });
+const out = (errors: Record<string, string> = {}): EvalOutput => ({ values: {}, errors, result: null });
 
 describe("assess", () => {
 	it("missing required field is drift; missing optional is not", () => {

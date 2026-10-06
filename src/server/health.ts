@@ -1,6 +1,14 @@
 import type { RawField } from "./browse";
-import type { SandboxOutput } from "./sandbox";
+import type { JsonObject } from "./json";
 import type { Field } from "./spec";
+
+// The result of coercing a page read and evaluating the condition over it.
+// result is null when a required field failed to read or coerce.
+export type EvalOutput = {
+	values: JsonObject;
+	errors: Record<string, string>;
+	result: { match: boolean; summary: string } | null;
+};
 
 // Drift is any sign that the selectors no longer point at what they were
 // compiled to point at. Every kind here is a reason to heal; none of them is
@@ -13,7 +21,7 @@ export type ProblemKind =
 
 export type Problem = { field: string; kind: ProblemKind; detail: string };
 
-export function assess(fields: Field[], raw: Record<string, RawField>, out: SandboxOutput): Problem[] {
+export function assess(fields: Field[], raw: Record<string, RawField>, out: EvalOutput): Problem[] {
 	const problems: Problem[] = [];
 	for (const f of fields) {
 		const r = raw[f.name];

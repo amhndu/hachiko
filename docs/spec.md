@@ -15,7 +15,7 @@ Checked against the code on 2026-10-05. Paths below are relative to
 | `Hachiko`: one per user; chat, registry, schedules, notifications | Agents SDK `AIChatAgent` (Durable Object, SQLite) | `agent.ts` |
 | `CheckWorkflow`: one per check | Workflows via `AgentWorkflow` | `workflow.ts` |
 | Rendering and extraction | Browser Run binding + `@cloudflare/puppeteer` | `browse.ts`, `inpage.ts` |
-| Coercion and predicate | Dynamic Workers (`worker_loaders`) | `sandbox.ts`, `sandboxed/coerce.js` |
+| Coercion and condition | plain Worker code, no binding | `coerce.ts`, `condition.ts`, `evaluate.ts` |
 | Orchestrator, compiler, healer | Workers AI via `agents/models/ai-sdk` | `agent.ts`, `compile.ts` |
 
 ## 2. The watch spec
@@ -32,40 +32,50 @@ The compiled, deterministic artifact. Schema: `spec.ts` `WatchSpecSchema`.
     "selector": "#sale-price",           // CSS, or "xpath:<expr>"
     "attr": "content",                   // optional: read an attribute, not text
     "type": "number",                    // text | number | date | exists
-    "pattern": "(\\d+) available",       // optional regex; first group wins
+    "after": "Sale price:",              // optional literal marker: keep what follows
+    "before": "(",                       // optional literal marker: keep what precedes
     "dateOrder": "dmy",                  // optional: dmy | mdy | ymd
     "all": false,                        // optional: list of every match
     "required": true,                    // default true
     "anchor": "Sale price"               // optional: label text next to the value
   }],
-  "predicate": "(v, ctx) => ({ match: v.price < 300, summary: `$${v.price}` })",
+  "condition": {                         // data, not code (section 7)
+    "mode": "all",                       // all | any
+    "clauses": [                         // 1..8
+      { "left": { "kind": "field", "name": "price" }, "op": "lt",
+        "right": { "kind": "value", "value": 300 } }
+    ]
+  },
+  "summary": "Sale price is {price} (was {prev.price})",  // placeholders only
   "notifyOn": "transition"               // transition | every-match
 }
 ```
 
-- **Coercion** (`sandboxed/coerce.js`):
-  - `number` takes the first numeric run and handles both `1,299.50`
-    and `1.299,50`.
+- **Coercion** (`coerce.ts`). Fully declarative: every regex in it is
+  fixed and ours.
+  - `after` / `before` cut the text at literal markers
+    (case-insensitive). A missing `after` marker is a coercion failure; a
+    missing `before` marker is ignored.
+  - `number` takes the first numeric run ("In stock (22 available)" is
+    22, "Rs. 45,000" is 45000) and handles both `1,299.50` and
+    `1.299,50`.
   - `date` produces `YYYY-MM-DD` (or `YYYY-MM-DDTHH:MM:00Z` when a time
-    is present). It accepts ISO dates, numeric dates (it needs
+    is present) from the first date in the text. It accepts ISO dates,
+    numeric dates (it needs
     `dateOrder` unless one side is over 12, and refuses ambiguous ones),
     and month names. Impossible dates are rejected.
   - `exists` is `count > 0` and never fails.
   - `text` is whitespace-collapsed.
   - `all` keeps the matches that coerce.
-- **The predicate** is a JS function expression
-  `(v, ctx) => ({ match: boolean, summary: string })`.
-  - `v` is the coerced values, frozen.
-  - `ctx` is `{ now, prev, lastMatch, url }`, frozen. `prev` is the last
-    *ok* run's values, or null; `now` is the check's start time, fixed
-    once per run.
-  - The predicate runs only when every required field coerced.
-  - Its output is schema-checked: anything else is a predicate error,
-    and `summary` is truncated to 280 chars.
-- **Determinism.** Given the same page DOM, the same `ctx`, and the same
-  spec version, a check produces the same values and the same result.
-  Clocks and randomness are banned in the predicate (section 7), and the
-  clock arrives as `ctx.now`.
+- **The condition** (`condition.ts`) is evaluated only when every
+  required field coerced; otherwise there is no result and the run is
+  drift (section 5). Section 7 has the language.
+- **The summary** is a template with `{field}`, `{prev.field}` and
+  `{today}` placeholders and nothing else. Missing values render as
+  `n/a`; the result is cut to 280 chars.
+- **Determinism.** Given the same page DOM, the same `prev`, and the same
+  `now`, a check produces the same values and the same result. The only
+  clock is `now`, the check's start time, fixed once per run.
 
 ## 3. Compiling (intent to spec)
 
@@ -76,7 +86,8 @@ The compiled, deterministic artifact. Schema: `spec.ts` `WatchSpecSchema`.
 2. Browser Run loads the page; `OUTLINE_SRC` produces the outline.
    - The outline lists data-bearing meta tags (`og:*`, `product:*`,
      `itemprop`, `description`), then every *visible* element with its
-     own text, up to 500 items and 40k chars.
+     own text, up to 300 items and 16k chars (sized for the free
+     Workers AI neuron budget).
    - Each element comes with a selector that was unique on the live page
      when captured. It prefers ids, `data-testid`, `data-test`, and
      `itemprop`, and skips hashed CSS-in-JS classes (`css-*`, `sc-*`,
@@ -94,22 +105,21 @@ The compiled, deterministic artifact. Schema: `spec.ts` `WatchSpecSchema`.
 
 ## 4. A check
 
-`workflow.ts` `CheckWorkflow`. Each line is one durable step.
+`workflow.ts` `CheckWorkflow`. Each I/O stage is one durable step.
 
 | step | does | retries |
 | --- | --- | --- |
 | `clock` | fixes `ctx.now` for the run | -- |
 | `observe` | Browser Run: load the page, run `EXTRACT_SRC` with the spec's fields | 2, 15s exponential, 2 min timeout |
-| `evaluate` | sandbox: coerce and predicate; then `assess` for drift | 1 |
+| (evaluate) | not a step: `evaluate.ts` coerces, evaluates the condition, and runs `assess` for drift. Pure, so a replay recomputes the same answer | -- |
 | `heal` | only on drift, and only with budget left (section 5) | 1, 5 min timeout |
 | `record` | `Hachiko.recordRun(report)`, the only writer of run results | default |
 
 - **Outcomes:**
   - `ok`: no problems and a result.
   - `healed`: drift was fixed, then a result.
-  - `broken`: either drift that did not heal, or a predicate error on
-    clean values. A predicate error means a bug in the condition, and
-    healing must not paper over it.
+  - `broken`: drift that did not heal. (A condition cannot fail at run
+    time: it is type-checked against the fields on save.)
   - `error`: navigation, HTTP 4xx/5xx, or an exception.
 - **`EXTRACT_SRC` per field returns `{ count, items: [{ text, attr,
   context }] }`**, up to 20 items of 500 chars each. A selector that
@@ -136,17 +146,17 @@ The compiled, deterministic artifact. Schema: `spec.ts` `WatchSpecSchema`.
     (case-insensitive).
   - `unparseable`: a required field did not coerce.
 - **Drift never produces `match: false`.** With drift present, the
-  predicate does not run on a required-field failure, and the outcome
+  condition does not run on a required-field failure, and the outcome
   is `healed` or `broken`, never `ok`.
 - **Heal procedure:** one browser session, a fresh outline, then up to
-  2 proposals. Each proposal is a patch of `selector`, `attr`,
-  `pattern`, `anchor`, and `dateOrder`, for the drifted fields only.
-  `name`, `type`, `description`, `predicate`, `url`, and `notifyOn` are
-  frozen.
+  2 proposals. Each proposal is a patch of `selector`, `attr`, `after`,
+  `before`, `anchor`, and `dateOrder`, for the drifted fields only.
+  `name`, `type`, `description`, `condition`, `summary`, `url`, and
+  `notifyOn` are frozen.
 - **A proposal is accepted only if all of these hold on the live page:**
   - `validateSpec` passes;
   - every field reads, every anchor holds, every value coerces;
-  - the predicate returns a result;
+  - the condition produces a result;
   - every healed value is plausible against the last good value:
     numbers within 10x, dates within 5 years of `now`, text non-empty.
 - A rejected proposal is fed back to the next attempt with its reasons.
@@ -158,22 +168,21 @@ The compiled, deterministic artifact. Schema: `spec.ts` `WatchSpecSchema`.
 ## 6. Hard limits
 
 All of these live in `limits.ts`; change it and this table together.
+They are sized for the **Workers Free plan**: Browser Run's 10
+browser-minutes a day is the binding quota (a check costs roughly 3-5 s),
+then Workers AI's 10,000 neurons a day.
 
 | limit | value |
 | --- | --- |
-| watches per user | 25 |
+| watches per user | 5 |
 | fields per spec | 8 |
-| selector / pattern / anchor length | 300 / 200 / 80 |
-| predicate length | 2000 chars |
-| sandbox CPU per evaluation | 50 ms (`limits.cpuMs`) |
-| sandbox subrequests | 0 (`limits.subRequests`), and `globalOutbound: null` |
-| sandbox wall clock | 2000 ms (host-side race) |
-| sandbox input | 32 KiB of JSON |
-| predicate summary | 280 chars |
+| selector / marker / anchor length | 300 / 80 / 80 |
+| condition | 8 clauses; string literals up to 200 chars |
+| summary template / rendered summary | 200 / 280 chars |
 | navigation / waitFor timeout | 30 s / 10 s |
 | text per matched element / matches per field | 500 chars / 20 |
-| outline | 500 items, 40k chars |
-| minimum schedule interval | 15 min, checked over the next 50 cron fires |
+| outline | 300 items, 16k chars |
+| minimum schedule interval | 60 min, checked over the next 50 cron fires |
 | heal attempts per run / heals per day | 2 / 3 |
 | errors in a row before notifying | 3 |
 | runs kept per watch | 200 |
@@ -184,43 +193,52 @@ All of these live in `limits.ts`; change it and this table together.
   `.local`, `.internal`, RFC 1918, link-local, or IP-literal IPv6
   hosts. The browser runs on Cloudflare, so this is about intent, not
   reachability.
-- **Cron** is UTC. If any gap between the next 50 fires is under 15
+- **Cron** is UTC. If any gap between the next 50 fires is under 60
   minutes, the cron is rejected; that catches bursts like
-  `*/5 9 * * *`.
+  `0,30 9 * * *`.
 
-## 7. The sandbox
+## 7. The condition language
 
-`sandbox.ts`. Model-written code runs here: the predicate, and the regex
-patterns (which run inside `coerce.js`, so a catastrophic regex burns
-the sandbox's CPU cap, not ours).
+`condition.ts`. A condition is data, evaluated by a small interpreter.
+Nothing model-written is compiled or executed anywhere in hachiko; the
+only model output that reaches a runtime is selectors, which run in
+Browser Run's remote Chrome.
 
-- **One Dynamic Worker per distinct predicate source.** Its id is
-  `predicate:<sha256(source)>`, so the runtime may reuse a warm isolate.
-  It has three modules: `main.js` (fixed), `coerce.js` (fixed, shipped
-  as source), and `predicate.js` (`export default (<source>);`).
-- `env: {}`: no bindings, no secrets.
-- `globalOutbound: null`: `fetch()` and `connect()` throw.
-- `limits: { cpuMs: 50, subRequests: 0 }`.
-- A host-side `Promise.race` against 2000 ms catches promises that
-  never settle.
-- The input is size-capped before the call. The output result is
-  zod-checked after.
-- **Static check before any of that** (`predicate-check.ts`, acorn AST):
-  - The source must be exactly one arrow or function expression.
-  - These are banned: `import()` and `import.meta`; the globals `eval`,
-    `Function`, `fetch`, `connect`, `WebSocket`, `EventSource`,
-    `XMLHttpRequest`, `importScripts`, `globalThis`, `self`, `caches`,
-    `setTimeout`, `setInterval`, and `queueMicrotask`; `Date.now`,
-    `Math.random`, and `performance.now`; and `new Date()` with no
-    arguments.
-  - Property names (`v.self`, `{ fetch: 1 }`) are not references and
-    are allowed.
-  - **The static check is not the security boundary.** The isolate is.
-    The check exists for determinism and for errors the compiler can
-    act on. Verified 2026-10-05: an eval-style escape
-    (`v.constructor.constructor("return fetch")()`) passes the static
-    check and dies in the isolate with "Code generation from strings
-    disallowed".
+- **Shape:** `{ mode: "all" | "any", clauses: Clause[] }`, 1 to 8
+  clauses, one level deep. A clause is `{ left, op, right? }`.
+- **Operands:**
+
+  | operand | value |
+  | --- | --- |
+  | `{ kind: "field", name, agg? }` | the field's coerced value now |
+  | `{ kind: "prev", name, agg? }` | its value on the last ok run; null on the first run |
+  | `{ kind: "value", value }` | a literal number, boolean, or string (200 chars max); `YYYY-MM-DD` strings are dates |
+  | `{ kind: "today", offsetDays? }` | today's UTC date from `now`, optionally shifted |
+
+  `agg` (`first`, `min`, `max`, `count`) turns a list field
+  (`all: true`) into one value, and is rejected on scalars.
+- **Operators:**
+  - `lt`, `lte`, `gt`, `gte`: two numbers, or two dates (compared by
+    instant).
+  - `eq`, `ne`: two values of the same type. Text is compared
+    case-insensitively.
+  - `contains`, `not_contains`: a text field (or text list) against a
+    text value, case-insensitive.
+  - `changed`: one field operand. True when the value differs from the
+    last ok run; false on the first run.
+  - `exists`, `missing`: one field operand. Non-null or null.
+- **Checked on save** (`checkCondition`, called by `validateSpec`):
+  unknown fields, type mismatches, a missing or extra right operand,
+  `agg` on scalars, lists without `agg`, and `changed` on anything but
+  a field. Each problem is a sentence the compiler can act on, so a
+  condition that saves cannot fail at run time.
+- **At run time:** a null operand satisfies no comparison (an absent
+  optional field never makes a condition true by accident); only
+  `missing` is true for it.
+- **Bounded:** evaluation is one pass over at most 8 clauses with fixed
+  operators. There are no loops, calls, regexes, or recursion, so no
+  input can make it run long. This interpreter is what the brief calls
+  the sandbox, and the limits are structural.
 
 ## 8. Scheduling
 
@@ -280,7 +298,8 @@ state plus `@callable` RPC).
   the schedule, last run, last ok, and version; and buttons for Run
   now, Pause/Resume, Details, and Delete.
 - **Details** show the intent, the fields table (selector and anchor
-  per field), the predicate, the version history, and recent runs with
+  per field), the condition (read back as one line) and summary
+  template, the version history, and recent runs with
   their problems.
 - **The chat** renders approvals as Approve/Reject, and `draft_watch`
   results as a draft card (values read now, match now, problems).
@@ -323,12 +342,14 @@ per user id, never per a name the client chooses.
 ## 15. Not verified yet
 
 - Every model call: orchestration, compile, heal, and structured output
-  on `kimi-k2.6` and `glm-5.3`. The code typechecks against
-  `ai@7` / `agents@0.26`, but has not run (the poc was built without
-  Cloudflare credentials).
-- **`cpuMs` enforcement.** Local workerd does not enforce it: a
-  `while (true)` predicate pinned a core under `vite dev`. Production
-  enforces it according to the Dynamic Workers docs. Verify on first
-  deploy, before taking any outside traffic.
+  on `glm-4.7-flash` and `llama-3.3-70b-instruct-fp8-fast`. The code
+  typechecks against `ai@7` / `agents@0.26` but has not run (the poc
+  was built without Cloudflare credentials). Llama 3.3 is on Workers
+  AI's JSON-mode list; whether the AI SDK provider requests JSON mode
+  for it is unconfirmed.
+- **The Free plan's 10 ms CPU limit** per invocation and per Workflow
+  step. Checks are I/O-bound and evaluation is tiny, but chat turns, the
+  picker screenshot (a ~300 KB base64 string), and zod parsing of large
+  outlines have not been profiled on a deployed Free account.
 - Browser Run in production. Locally, the binding drove the machine's
   Chrome.

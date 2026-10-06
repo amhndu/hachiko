@@ -7,17 +7,18 @@ drops under $300." "Tell me when the ISRO launch date on
 https://lvg.shar.gov.in/VSCREGISTRATION/index.jsp changes and is still in
 the future." A chat agent compiles the sentence into a **deterministic
 watch**: CSS/XPath selectors, a typed coercion for each value, and a
-small JS predicate. It saves that with a cron schedule. After that, no
-model runs on the happy path: a scheduled check loads the page, reads
-the values, and runs the predicate in a sandbox. When the site changes
+declarative condition (eg "launchDate changed and launchDate > today").
+It saves that with a cron schedule. After that, no model runs on the
+happy path: a scheduled check loads the page, reads the values, and
+evaluates the condition. When the site changes
 its markup the watch notices, **heals itself**, and says so. It never
 reports a broken selector as "condition not met".
 
 Built on Cloudflare: Agents SDK (a Durable Object per user, which holds
 the chat, the watch registry, and the cron schedules), Workflows (each
 check is a durable observe -> evaluate -> heal -> record run), Browser
-Run (rendering), Dynamic Workers (the sandbox), and Workers AI (the
-orchestrator, the compiler, the healer).
+Run (rendering), and Workers AI (the orchestrator, the compiler, the
+healer). Everything runs on the Workers Free plan.
 
 **Status: poc** -- specced and built 2026-10-05. The contract is
 [spec.md](spec.md), and [resources.md](resources.md) collects the
@@ -56,20 +57,20 @@ self-repairing.
   creation time and repairs it at heal time. Ordinary checks never call
   a model. So checks are cheap, reproducible, and auditable (every spec
   version is stored with the reason it exists).
-- **Everything the model writes runs caged.** Selectors run in a remote
-  Browser Run Chrome, never in our process. Regex patterns and the
-  predicate run in a fresh Dynamic Worker with no network
-  (`globalOutbound: null`), no bindings, a CPU cap, and a wall-clock
-  race. On top of that sits a static AST check (no `fetch`, no
-  `Date.now`, no `eval`), which gives early, readable errors. The
-  isolate is the actual wall. See spec section 7.
+- **Nothing the model writes is executed.** Selectors run in a remote
+  Browser Run Chrome, never in our process. Text is cut at literal
+  `after` / `before` markers, not regexes. The condition is a flat list
+  of typed clauses, checked against the fields on save and evaluated by
+  a small interpreter that can do only bounded work. That interpreter is
+  the sandbox; its limits are structural rather than enforced at run
+  time. See spec section 7.
 - **Drift is never "no match".** There are four drift signals: the
   selector matches nothing, the selector errors, the value no longer
   coerces, or the *anchor* (a stable label next to the value) is gone.
   The anchor is what catches the nastiest failure, where a selector
   still matches but now points at the wrong element.
 - **Heals are gated, not trusted.** The healer may move selectors only:
-  names, types, the predicate, and the URL are the user's intent and
+  names, types, the condition, and the URL are the user's intent and
   are frozen. A proposed heal is accepted only if it reads every field
   on the live page, its anchors hold, and its values are plausible next
   to the last good ones (numbers within 10x, dates within 5 years).
@@ -98,7 +99,8 @@ self-repairing.
 Cloudflare docs (Agents 0.26, Browser Run, Dynamic Workers, Workflows,
 Workers AI catalog). Dynamic Workers turned out to be the right sandbox:
 `globalOutbound: null` plus `limits: { cpuMs, subRequests }` is exactly
-the hard-limit primitive the brief asked for.
+the hard-limit primitive the brief asked for. (Superseded 2026-10-06:
+Paid-only; see below.)
 
 2026-10-05: poc built. 57 unit and integration tests
 pass, including the in-page extractor and outline scripts against a
@@ -126,7 +128,8 @@ through the UI with Playwright:
 - The picker rendered the page, hit-tested the price, and handed
   `p.price_color:nth-of-type(1)` to the composer.
 
-The sandbox probes:
+The sandbox probes, from the Dynamic Workers version (superseded
+2026-10-06):
 - `fetch` was rejected statically.
 - A `constructor.constructor("return fetch")` escape died with "Code
   generation from strings disallowed".
@@ -140,19 +143,48 @@ The sandbox probes:
 Live example.com had lost its `<h1>`, and the watch reported it as
 `missing` drift. That is the right behavior, observed by accident.
 
-**Not verified** (the poc was built without Cloudflare credentials): every
-model path (chat orchestration, `draft_watch` compile, heal proposals,
-structured output on the chosen Workers AI models) and the deployed
-`cpuMs` enforcement. The code for those paths typechecks against the
-current SDK types, but has not run.
+2026-10-06: **free tier only, and no executed code.** Two findings
+forced this:
+- Dynamic Workers, the original sandbox, are Paid-only.
+- The two original models (`kimi-k2.6`, `glm-5.3`) need paid billing
+  even on the Free plan.
+
+A QuickJS-in-WebAssembly sandbox was tried and dropped the same day.
+Its instruction budget counts bytecode ops, so a loop over expensive
+built-ins (`'x'.repeat(1e5)`) ran for seconds between budget checks.
+Replaced instead with:
+- a declarative condition language: flat typed clauses, checked on
+  save;
+- literal `after` / `before` markers instead of regex patterns;
+- free models: `glm-4.7-flash` (function calling) to orchestrate, and
+  `llama-3.3-70b-instruct-fp8-fast` (JSON mode) to compile and heal;
+- limits resized to the free quotas: 5 watches, hourly minimum, 16k-char
+  outlines.
+
+Every `JSON.parse` and every `page.evaluate` result is now checked
+against a zod schema rather than cast. 70 tests pass. A live offline
+run against books.toscrape.com read price 51.77 and stock 22 through
+the Workflow, and a mistyped condition (`contains` on a number) was
+rejected with a clear message.
+
+**Not verified** (the poc was built without Cloudflare credentials):
+- Every model path: chat orchestration, `draft_watch` compile, heal
+  proposals, and structured output on the chosen models. The code for
+  those paths typechecks against the current SDK types, but has not run.
+- The Free plan's 10 ms CPU limit, on a deployed account.
 
 ## Open questions
 
-- **Model choice.** `@cf/moonshotai/kimi-k2.6` for the orchestrator
-  (multi-turn tool calling) and `@cf/zai-org/glm-5.3` for compile and
-  heal (structured output). Both are picked from the catalog, not
-  measured. Both are vars in `wrangler.jsonc`, so swapping is a config
-  change.
+- **Model choice.** `@cf/zai-org/glm-4.7-flash` for the orchestrator
+  (function calling, cheap per turn) and
+  `@cf/meta/llama-3.3-70b-instruct-fp8-fast` for compile and heal (on
+  Workers AI's JSON-mode list). Both are free-tier models picked from
+  the catalog, not measured. Both are vars in `wrangler.jsonc`, so
+  swapping is a config change.
+- **Conditions the language cannot say.** It covers comparisons,
+  changes, presence, and aggregates over lists. "A new item appeared in
+  the list" or arithmetic ("dropped by 20%") would need new operators.
+  Add them as data, never as code.
 - **Pages behind bot walls.** Browser Run identifies itself as a bot.
   Some retail sites will serve a challenge page, which shows up as
   drift (good, loud) but can never heal (bad, permanent). Maybe classify

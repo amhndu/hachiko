@@ -3,6 +3,7 @@ import { useAgent } from "agents/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { PickerBox, PickerSnapshot } from "../server/browse";
+import { describeCondition } from "../server/condition";
 import type { HachikoState, Notice, RunView, WatchView } from "../server/agent";
 import type { Hachiko } from "../server/agent";
 
@@ -110,13 +111,21 @@ function WatchCard({ watch: w, agent }: { watch: WatchView; agent: Agent }) {
 								<tr key={f.name} title={f.description}>
 									<td>{f.name}</td>
 									<td>{f.type}{f.all ? "[]" : ""}</td>
-									<td><code>{f.selector}{f.attr ? ` @${f.attr}` : ""}</code></td>
+									<td>
+										<code>{f.selector}{f.attr ? ` @${f.attr}` : ""}</code>
+										{f.after && <span> after "{f.after}"</span>}
+										{f.before && <span> before "{f.before}"</span>}
+									</td>
 									<td>{f.anchor ?? ""}</td>
 								</tr>
 							))}
 						</tbody>
 					</table>
-					<pre className="code">{w.spec.predicate}</pre>
+					<p className="code">
+						<strong>when</strong> {describeCondition(w.spec.condition)}
+						<br />
+						<strong>says</strong> {w.spec.summary}
+					</p>
 					{history && (
 						<>
 							<h4>Versions</h4>

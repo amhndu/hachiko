@@ -1,7 +1,7 @@
 import { parseCronExpression } from "cron-schedule";
 import { z } from "zod";
 import { LIMITS } from "./limits";
-import { checkPredicate } from "./predicate-check";
+import { checkCondition, ConditionSchema } from "./condition";
 
 // A field is one value read off the page. Selectors are CSS by default, or
 // XPath when prefixed with "xpath:".
@@ -9,7 +9,7 @@ export const FieldSchema = z.object({
 	name: z
 		.string()
 		.regex(/^[a-zA-Z_][a-zA-Z0-9_]{0,31}$/)
-		.describe("identifier the predicate reads, eg price"),
+		.describe("identifier the condition reads, eg price"),
 	description: z
 		.string()
 		.min(1)
@@ -26,11 +26,18 @@ export const FieldSchema = z.object({
 		.optional()
 		.describe("read this attribute instead of the text, eg content, href, value"),
 	type: z.enum(["text", "number", "date", "exists"]),
-	pattern: z
+	after: z
 		.string()
-		.max(LIMITS.maxPatternLen)
+		.min(1)
+		.max(LIMITS.maxMarkerLen)
 		.optional()
-		.describe("regex applied to the raw text before coercion; first capture group wins"),
+		.describe("literal text; keep only what follows it, eg 'Launch Date:'"),
+	before: z
+		.string()
+		.min(1)
+		.max(LIMITS.maxMarkerLen)
+		.optional()
+		.describe("literal text; keep only what precedes it, eg '('"),
 	dateOrder: z
 		.enum(["dmy", "mdy", "ymd"])
 		.optional()
@@ -51,11 +58,12 @@ export const WatchSpecSchema = z.object({
 	url: z.url(),
 	waitFor: z.string().max(LIMITS.maxSelectorLen).optional(),
 	fields: z.array(FieldSchema).min(1).max(LIMITS.maxFields),
-	predicate: z
+	condition: ConditionSchema,
+	summary: z
 		.string()
 		.min(1)
-		.max(LIMITS.maxPredicateLen)
-		.describe("JS arrow function (v, ctx) => ({ match, summary })"),
+		.max(LIMITS.maxSummaryTemplateLen)
+		.describe("template with {field}, {prev.field} and {today} placeholders"),
 	notifyOn: z.enum(["transition", "every-match"]),
 });
 
@@ -86,17 +94,10 @@ export function validateSpec(input: unknown): WatchSpec {
 	for (const f of spec.fields) {
 		if (names.has(f.name)) problems.push(`fields: duplicate name ${f.name}`);
 		names.add(f.name);
-		if (f.pattern !== undefined) {
-			try {
-				new RegExp(f.pattern);
-			} catch (e) {
-				problems.push(`fields.${f.name}.pattern: ${(e as Error).message}`);
-			}
-		}
 		if (f.type === "exists" && f.all) problems.push(`fields.${f.name}: exists cannot be all`);
 	}
 
-	problems.push(...checkPredicate(spec.predicate));
+	problems.push(...checkCondition(spec.condition, spec.fields));
 	if (problems.length > 0) throw new SpecError(problems);
 	return spec;
 }

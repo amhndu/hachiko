@@ -10,7 +10,6 @@
 	},
 	"ai": { "binding": "AI" },
 	"browser": { "binding": "BROWSER" },
-	"worker_loaders": [{ "binding": "LOADER" }],
 	"durable_objects": {
 		"bindings": [{ "name": "Hachiko", "class_name": "Hachiko" }]
 	},
@@ -19,18 +18,18 @@
 	],
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hachiko"] }],
 	"vars": {
-		"ORCHESTRATOR_MODEL": "@cf/moonshotai/kimi-k2.6",
-		"COMPILER_MODEL": "@cf/zai-org/glm-5.3"
+		"ORCHESTRATOR_MODEL": "@cf/zai-org/glm-4.7-flash",
+		"COMPILER_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 	},
 	"observability": { "enabled": true },
 	// Local runs without Cloudflare credentials: every binding except the
 	// models, which have no local emulation. The manual-spec path (testSpec,
 	// createFromSpec) and scheduled checks work; chat, compile and heal throw.
-	// CLOUDFLARE_ENV=offline npm run dev
+	// Everything here runs on the Workers Free plan.
+	// CLOUDFLARE_ENV=offline pnpm dev
 	"env": {
 		"offline": {
 			"browser": { "binding": "BROWSER", "remote": false },
-			"worker_loaders": [{ "binding": "LOADER" }],
 			"durable_objects": {
 				"bindings": [{ "name": "Hachiko", "class_name": "Hachiko" }]
 			},
@@ -38,8 +37,8 @@
 				{ "name": "hachiko-check", "binding": "CHECK_WORKFLOW", "class_name": "CheckWorkflow" }
 			],
 			"vars": {
-				"ORCHESTRATOR_MODEL": "@cf/moonshotai/kimi-k2.6",
-				"COMPILER_MODEL": "@cf/zai-org/glm-5.3"
+				"ORCHESTRATOR_MODEL": "@cf/zai-org/glm-4.7-flash",
+				"COMPILER_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 			}
 		}
 	}

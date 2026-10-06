@@ -35,19 +35,6 @@ Manually select:
 
 More in [docs/design.md](docs/design.md), [docs/spec.md](docs/spec.md) and [docs/resources.md](docs/resources.md).
 
-## Hard limits
-
-Enforced in `src/server/limits.ts`:
-
-- 5 watches per user, 8 fields per watch
-- Conditions: at most 8 clauses, fixed operators, no code
-- Minimum schedule interval is 1 hour, cron is in UTC
-- At most 2 heal attempts per run, 3 heals per watch per day
-
-These are sized for the Workers Free plan. The tightest quota is Browser Run's 10 browser-minutes a day: a check costs roughly 3-5 s, so 5 hourly watches use about 8 minutes and leave room for drafts, heals and the picker. Workers AI's 10,000 free neurons a day cover roughly 25-30 compiles or heals with the default models. On the Paid plan, raise the numbers in `limits.ts`.
-
-Not yet measured on a deployed Free account: the Free plan's 10 ms CPU limit per invocation and per Workflow step. Checks are I/O-bound and the evaluator is tiny, but the chat turns and the picker's screenshot have not been profiled against it.
-
 ## Setup
 
 Needs Node.js 20+, pnpm, and a Cloudflare account. Everything runs on the **Workers Free** plan: Workers, Durable Objects (SQLite), Workflows, Browser Run and Workers AI all have free tiers, and the default models do not require paid billing. Chromium is only needed for the browser tests.

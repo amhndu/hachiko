@@ -88,10 +88,9 @@ self-repairing.
   over the screenshot. Third-party HTML never runs in our origin. This
   is the changedetection.io Visual Selector approach; see resources.md
   for why the open-source in-page pickers did not fit.
-- **Auth: tier 1** (users plus per-device API tokens, invite-only) when
-  this serves anyone but me. The poc has no auth: the
-  agent instance is named `me`, and anyone who can reach the dev
-  server can use it.
+- **Auth: users plus per-device API tokens, invite-only,** before it
+  serves more than one person. The poc has no auth: the agent instance
+  is named `me`, and anyone who can reach the server can use it.
 
 ## Build log
 
@@ -141,7 +140,7 @@ The sandbox probes:
 Live example.com had lost its `<h1>`, and the watch reported it as
 `missing` drift. That is the right behavior, observed by accident.
 
-**Not verified** (no Cloudflare credentials on this machine): every
+**Not verified** (the poc was built without Cloudflare credentials): every
 model path (chat orchestration, `draft_watch` compile, heal proposals,
 structured output on the chosen Workers AI models) and the deployed
 `cpuMs` enforcement. The code for those paths typechecks against the

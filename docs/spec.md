@@ -316,16 +316,16 @@ outside the Durable Object.
 ## 14. Auth
 
 The poc has none: the client connects to the instance named `me`. When
-it serves anyone else it starts at **tier 1** auth (users plus
-per-device API tokens, invite-only, no roles), with one `Hachiko` instance
+it serves anyone else it needs auth (users plus per-device API
+tokens, invite-only, no roles), with one `Hachiko` instance
 per user id, never per a name the client chooses.
 
 ## 15. Not verified yet
 
 - Every model call: orchestration, compile, heal, and structured output
   on `kimi-k2.6` and `glm-5.3`. The code typechecks against
-  `ai@7` / `agents@0.26`, but has not run (no Cloudflare credentials on
-  the dev machine).
+  `ai@7` / `agents@0.26`, but has not run (the poc was built without
+  Cloudflare credentials).
 - **`cpuMs` enforcement.** Local workerd does not enforce it: a
   `while (true)` predicate pinned a core under `vite dev`. Production
   enforces it according to the Dynamic Workers docs. Verify on first

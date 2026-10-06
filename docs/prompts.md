@@ -44,3 +44,7 @@ reference: https://developers.cloudflare.com/agents/
 * use pnpm
 
 * make sure user conditions are evaluated in a sandbox and ensure limits are enforced on it
+
+* Replace cloudflare dynamic workers with deterministic / declarative extraction. All components should work in free tier
+
+* ensure usecases like "notify me when product X has a sale price less than Y" "notify me when the ISRO rocket launch date on https://lvg.shar.gov.in/VSCREGISTRATION/index.jsp is updated and is in the future" are expressible in this format. If needed, consider CEL if the current declarative spec is insufficient

@@ -511,8 +511,18 @@ export class Hachiko extends AIChatAgent<Env, HachikoState> {
 			prev: w.last_values ? parseJson(JsonObjectSchema, w.last_values, `watch ${watchId} last values`) : null,
 			healBudget: LIMITS.maxHealsPerDay - healsToday,
 		};
-		const instanceId = await this.runWorkflow("CHECK_WORKFLOW", params);
-		this.sql`UPDATE watches SET running_instance = ${instanceId}, running_since = ${nowIso()} WHERE id = ${watchId}`;
+		// Reserve before yielding. Writing this after runWorkflow allowed two
+		// near-simultaneous manual/scheduled triggers to launch duplicate checks.
+		const reservation = `starting:${crypto.randomUUID()}`;
+		this.sql`UPDATE watches SET running_instance = ${reservation}, running_since = ${nowIso()} WHERE id = ${watchId}`;
+		let instanceId: string;
+		try {
+			instanceId = await this.runWorkflow("CHECK_WORKFLOW", params);
+		} catch (e) {
+			this.sql`UPDATE watches SET running_instance = NULL, running_since = NULL WHERE id = ${watchId} AND running_instance = ${reservation}`;
+			throw e;
+		}
+		this.sql`UPDATE watches SET running_instance = ${instanceId} WHERE id = ${watchId} AND running_instance = ${reservation}`;
 		this.refresh();
 		return { started: true, instanceId };
 	}

@@ -48,6 +48,11 @@ export class FetchError extends Error {
 	}
 }
 
+// Browser Run Free is limited to three simultaneous browsers account-wide.
+// Serialize sessions within this Worker isolate to leave room for other
+// isolates and prevent one chat turn from exhausting the shared allowance.
+let browserQueue: Promise<void> = Promise.resolve();
+
 // One browser session per call: launch, load, run fn, close. Images, fonts
 // and media are blocked unless the caller wants pixels (the picker).
 export async function withPage<T>(
@@ -57,32 +62,91 @@ export async function withPage<T>(
 	fn: (page: Page) => Promise<T>,
 	opts: { pixels?: boolean } = {},
 ): Promise<T> {
-	const browser = await puppeteer.launch(env.BROWSER);
+	const sessionId = crypto.randomUUID();
+	const host = safeHost(url);
+	const requestedAt = Date.now();
+	let release!: () => void;
+	const previous = browserQueue;
+	browserQueue = new Promise<void>((resolve) => { release = resolve; });
+	await previous;
+	const queueWaitMs = Date.now() - requestedAt;
+	let phase = "launch";
+	console.info("browser.session.start", { sessionId, host, queueWaitMs, pixels: opts.pixels ?? false });
 	try {
-		const page = await browser.newPage();
-		await page.setViewport({ width: 1280, height: 900 });
-		await page.setRequestInterception(true);
-		page.on("request", (req) => {
-			const blocked = opts.pixels ? ["media"] : ["image", "media", "font"];
-			if (blocked.includes(req.resourceType())) void req.abort();
-			else void req.continue();
-		});
-		let res;
+		const launched = await puppeteer.launch(env.BROWSER);
 		try {
-			res = await page.goto(url, { waitUntil: "networkidle2", timeout: LIMITS.navTimeoutMs });
-		} catch (e) {
-			throw new FetchError(`navigation failed: ${(e as Error).message}`);
+			phase = "new_page";
+			const page = await launched.newPage();
+			await page.setViewport({ width: 1280, height: 900 });
+			await page.setRequestInterception(true);
+			page.on("request", (req) => {
+				const blocked = opts.pixels ? ["media"] : ["image", "media", "font"];
+				if (blocked.includes(req.resourceType())) void req.abort();
+				else void req.continue();
+			});
+			let res;
+			try {
+				phase = "navigation";
+				res = await page.goto(url, { waitUntil: "networkidle2", timeout: LIMITS.navTimeoutMs });
+			} catch (e) {
+				throw new FetchError(`navigation failed: ${(e as Error).message}`);
+			}
+			console.info("browser.session.navigation_complete", {
+				sessionId,
+				host,
+				status: res?.status() ?? null,
+				startupAndNavigationMs: Date.now() - requestedAt - queueWaitMs,
+			});
+			if (res && res.status() >= 400) throw new FetchError(`HTTP ${res.status()} from ${url}`);
+			if (waitFor) {
+				// A missing waitFor is not fatal here: the fields will come back
+				// empty and the drift check names the problem precisely.
+				phase = "wait_for_selector";
+				await page.waitForSelector(waitFor, { timeout: LIMITS.waitForTimeoutMs }).catch(() => undefined);
+			}
+			phase = "page_task";
+			return await fn(page);
+		} finally {
+			phase = "close";
+			try {
+				await launched.close();
+				console.info("browser.session.close", { sessionId, host, elapsedMs: Date.now() - requestedAt });
+			} catch (e) {
+				console.error("browser.session.close_error", {
+					sessionId,
+					host,
+					errorName: e instanceof Error ? e.name : "UnknownError",
+					error: safeError(e, url),
+				});
+				throw e;
+			}
 		}
-		if (res && res.status() >= 400) throw new FetchError(`HTTP ${res.status()} from ${url}`);
-		if (waitFor) {
-			// A missing waitFor is not fatal here: the fields will come back
-			// empty and the drift check names the problem precisely.
-			await page.waitForSelector(waitFor, { timeout: LIMITS.waitForTimeoutMs }).catch(() => undefined);
-		}
-		return await fn(page);
+	} catch (e) {
+		console.error("browser.session.error", {
+			sessionId,
+			host,
+			phase,
+			elapsedMs: Date.now() - requestedAt,
+			errorName: e instanceof Error ? e.name : "UnknownError",
+			error: safeError(e, url),
+		});
+		throw e;
 	} finally {
-		await browser.close();
+		release();
 	}
+}
+
+function safeHost(rawUrl: string): string {
+	try {
+		return new URL(rawUrl).host;
+	} catch {
+		return "invalid-url";
+	}
+}
+
+function safeError(error: unknown, rawUrl: string): string {
+	const message = error instanceof Error ? error.message : String(error);
+	return message.replaceAll(rawUrl, safeHost(rawUrl)).slice(0, 500);
 }
 
 export async function extract(page: Page, fields: Field[]): Promise<Record<string, RawField>> {
